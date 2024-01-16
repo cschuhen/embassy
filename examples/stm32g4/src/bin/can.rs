@@ -19,22 +19,12 @@ bind_interrupts!(struct Irqs {
 async fn main(_spawner: Spawner) {
     let config = Config::default();
 
-
     let mut peripherals = embassy_stm32::init(config);
 
-    let can = can::Fdcan::new(peripherals.FDCAN1, peripherals.PA11, peripherals.PA12, Irqs);
-    
+    let mut can = can::Fdcan::new(peripherals.FDCAN1, peripherals.PA11, peripherals.PA12, Irqs);
 
-
-    
     // 250k bps
-    let bit_timing = can::config::NominalBitTiming {
-        sync_jump_width: 1.try_into().unwrap(),
-        prescaler: 4.try_into().unwrap(),
-        seg1: 13.try_into().unwrap(),
-        seg2: 2.try_into().unwrap(),
-    };
-    can.can.borrow_mut().set_nominal_bit_timing(bit_timing);
+    can.set_bitrate(250_000);
 
     info!("Configured");
 
