@@ -19,7 +19,7 @@ bind_interrupts!(struct Irqs {
 async fn main(_spawner: Spawner) {
     let config = Config::default();
 
-    let mut peripherals = embassy_stm32::init(config);
+    let peripherals = embassy_stm32::init(config);
 
     let mut can = can::Fdcan::new(peripherals.FDCAN1, peripherals.PA11, peripherals.PA12, Irqs);
 

@@ -204,8 +204,7 @@ impl FdcanOperatingMode for fdcan::RestrictedOperationMode {}
 impl FdcanOperatingMode for fdcan::BusMonitoringMode {}
 impl FdcanOperatingMode for fdcan::TestMode {}
 
-//pub const fn calc_fdcan_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> Option<u32> {
-pub fn calc_fdcan_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> Option<config::NominalBitTiming> {
+fn calc_fdcan_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> Option<config::NominalBitTiming> {
     const BS1_MAX: u8 = 16;
     const BS2_MAX: u8 = 8;
     const MAX_SAMPLE_POINT_PERMILL: u16 = 900;
@@ -290,17 +289,18 @@ pub fn calc_fdcan_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) ->
     }
 
     // One is recommended by DS-015, CANOpen, and DeviceNet
-    let sjw = 1;
+    let sync_jump_width = core::num::NonZeroU8::new(1)?;
 
-    let bit_timing = config::NominalBitTiming {
-        sync_jump_width: sjw.try_into().unwrap(),
-        prescaler: core::num::NonZeroU16::new(prescaler as u16).unwrap(),
-        seg1: bs1.try_into().unwrap(),
-        seg2: bs2.try_into().unwrap(),
-    };
+    let seg1 = core::num::NonZeroU8::new(bs1)?;
+    let seg2 = core::num::NonZeroU8::new(bs2)?;
+    let nz_prescaler = core::num::NonZeroU16::new(prescaler as u16)?;
 
-    defmt::println!("CAN sbt. sjw={} bs1={} bs2={} ps={}", sjw, bs1, bs2, prescaler);
-    Some(bit_timing)
+    Some(config::NominalBitTiming {
+        sync_jump_width,
+        prescaler: nz_prescaler,
+        seg1,
+        seg2,
+    })
 }
 
 pub struct Fdcan<'d, T: Instance, M: FdcanOperatingMode> {
