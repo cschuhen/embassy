@@ -14,6 +14,7 @@ stm32f429zi = ["embassy-stm32/stm32f429zi", "chrono", "eth", "stop", "can", "not
 stm32f446re = ["embassy-stm32/stm32f446re", "chrono", "stop", "can", "not-gpdma", "dac", "sdmmc"]
 stm32f767zi = ["embassy-stm32/stm32f767zi", "chrono", "not-gpdma", "eth", "rng"]
 stm32g071rb = ["embassy-stm32/stm32g071rb", "cm0", "not-gpdma", "dac"]
+stm32g431cb = ["embassy-stm32/stm32g431cb", "chrono", "stop", "not-gpdma", "rng", "can"]
 stm32g491re = ["embassy-stm32/stm32g491re", "chrono", "stop", "not-gpdma", "rng"]
 stm32h563zi = ["embassy-stm32/stm32h563zi", "chrono", "eth", "rng"]
 stm32h753zi = ["embassy-stm32/stm32h753zi", "chrono", "not-gpdma", "eth", "rng"]
@@ -36,7 +37,10 @@ rng = []
 sdmmc = []
 stop = ["embassy-stm32/low-power", "embassy-stm32/low-power-debug-with-sleep"]
 chrono = ["embassy-stm32/chrono", "dep:chrono"]
-can = []
+#can = []
+fdcan = ["embassy-executor/task-arena-size-4096"]
+can = ["embassy-executor/task-arena-size-4096"]
+#fdcan = []
 ble = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/ble"]
 mac = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/mac"]
 embassy-stm32-wpan = []
@@ -69,7 +73,7 @@ micromath = "2.0.0"
 panic-probe = { version = "0.3.0", features = ["print-defmt"] }
 rand_core = { version = "0.6", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
-static_cell = "2"
+static_cell = { version = "2", features = ["nightly"]}
 portable-atomic = { version = "1.5", features = [] }
 
 chrono = { version = "^0.4", default-features = false, optional = true}
@@ -79,6 +83,11 @@ chrono = { version = "^0.4", default-features = false, optional = true}
 [[bin]]
 name = "can"
 path = "src/bin/can.rs"
+required-features = [ "can",]
+
+[[bin]]
+name = "fdcan"
+path = "src/bin/fdcan.rs"
 required-features = [ "can",]
 
 [[bin]]
