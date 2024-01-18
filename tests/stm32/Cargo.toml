@@ -37,10 +37,8 @@ rng = []
 sdmmc = []
 stop = ["embassy-stm32/low-power", "embassy-stm32/low-power-debug-with-sleep"]
 chrono = ["embassy-stm32/chrono", "dep:chrono"]
-#can = []
-fdcan = ["embassy-executor/task-arena-size-4096"]
-can = ["embassy-executor/task-arena-size-4096"]
-#fdcan = []
+can = []
+fdcan = []
 ble = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/ble"]
 mac = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/mac"]
 embassy-stm32-wpan = []
@@ -73,7 +71,7 @@ micromath = "2.0.0"
 panic-probe = { version = "0.3.0", features = ["print-defmt"] }
 rand_core = { version = "0.6", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
-static_cell = { version = "2", features = ["nightly"]}
+static_cell = { version = "2"}
 portable-atomic = { version = "1.5", features = [] }
 
 chrono = { version = "^0.4", default-features = false, optional = true}
