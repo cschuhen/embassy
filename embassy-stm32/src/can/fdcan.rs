@@ -18,17 +18,24 @@ use crate::interrupt::typelevel::Interrupt;
 use crate::rcc::RccPeripheral;
 use crate::{interrupt, peripherals, Peripheral};
 
+/// CAN Frame returned by read
 pub struct RxFrame {
+    /// Header info: frame ID, data length and other meta
     pub header: RxFrameInfo,
+    /// Frame data
     pub data: Data,
 }
 
+/// CAN frame used for write
 pub struct TxFrame {
+    /// Header info: frame ID, data length and other meta
     pub header: TxFrameHeader,
+    /// Frame data
     pub data: Data,
 }
 
 impl TxFrame {
+    /// Create new TX frame frokm header and data
     pub fn new(header: TxFrameHeader, data: &[u8]) -> Option<Self> {
         if data.len() < header.len as usize {
             return None;
@@ -51,10 +58,12 @@ impl TxFrame {
         Some(TxFrame { header, data })
     }
 
+    /// Access frame data. Slice length will match header.
     pub fn data(&self) -> &[u8] {
         &self.data.bytes[..(self.header.len as usize)]
     }
 }
+
 impl RxFrame {
     pub(crate) fn new(header: RxFrameInfo, data: &[u8]) -> Self {
         let data = Data::new(&data).unwrap_or_else(|| Data::empty());
@@ -62,6 +71,7 @@ impl RxFrame {
         RxFrame { header, data }
     }
 
+    /// Access frame data. Slice length will match header.
     pub fn data(&self) -> &[u8] {
         &self.data.bytes[..(self.header.len as usize)]
     }
@@ -91,6 +101,7 @@ impl Data {
         Some(Self { bytes })
     }
 
+    /// Raw read access to data.
     pub fn raw(&self) -> &[u8] {
         &self.bytes
     }
@@ -117,7 +128,7 @@ impl Data {
     }
 }
 
-/// Interrupt handler.
+/// Interrupt handler channel 0.
 pub struct IT0InterruptHandler<T: Instance> {
     _phantom: PhantomData<T>,
 }
@@ -158,6 +169,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::IT0Interrupt> for IT0Interrup
     }
 }
 
+/// Interrupt handler channel 1.
 pub struct IT1InterruptHandler<T: Instance> {
     _phantom: PhantomData<T>,
 }
@@ -166,17 +178,31 @@ impl<T: Instance> interrupt::typelevel::Handler<T::IT1Interrupt> for IT1Interrup
     unsafe fn on_interrupt() {}
 }
 
+/// Bus error
 #[derive(Debug)]
 pub enum BusError {
+    /// Bit stuffing error - more than 5 equal bits
     Stuff,
+    /// Form error - A fixed format part of a received message has wrong format
     Form,
+    /// The message transmitted by the FDCAN was not acknowledged by another node.
     Acknowledge,
+    /// Bit0Error: During the transmission of a message the device wanted to send a dominant level
+    /// but the monitored bus value was recessive.
     BitRecessive,
+    /// Bit1Error: During the transmission of a message the device wanted to send a recessive level 
+    /// but the monitored bus value was dominant.
     BitDominant,
+    /// The CRC check sum of a received message was incorrect. The CRC of an
+    /// incoming message does not match with the CRC calculated from the received data.
     Crc,
+    /// A software error occured
     Software,
+    ///  The FDCAN is in Bus_Off state.
     BusOff,
+    ///  The FDCAN is in the Error_Passive state.
     BusPassive,
+    ///  At least one of error counter has reached the Error_Warning limit of 96.
     BusWarning,
 }
 
@@ -184,8 +210,8 @@ impl BusError {
     fn try_from(lec: LastErrorCode) -> Option<BusError> {
         match lec {
             LastErrorCode::AckError => Some(BusError::Acknowledge),
-            LastErrorCode::Bit0Error => Some(BusError::BitRecessive), // TODO: verify
-            LastErrorCode::Bit1Error => Some(BusError::BitDominant),  // TODO: verify
+            LastErrorCode::Bit0Error => Some(BusError::BitRecessive),
+            LastErrorCode::Bit1Error => Some(BusError::BitDominant),
             LastErrorCode::CRCError => Some(BusError::Crc),
             LastErrorCode::FormError => Some(BusError::Form),
             LastErrorCode::StuffError => Some(BusError::Stuff),
@@ -194,6 +220,7 @@ impl BusError {
     }
 }
 
+/// Operating modes trait
 pub trait FdcanOperatingMode {}
 impl FdcanOperatingMode for fdcan::PoweredDownMode {}
 impl FdcanOperatingMode for fdcan::ConfigMode {}
@@ -303,7 +330,9 @@ fn calc_fdcan_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> Opt
     })
 }
 
+/// FDCAN Instance
 pub struct Fdcan<'d, T: Instance, M: FdcanOperatingMode> {
+    /// Reference to internals.
     pub can: RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
 }
 
@@ -363,6 +392,7 @@ impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
 macro_rules! impl_transition {
     ($from_mode:ident, $to_mode:ident, $name:ident, $func: ident) => {
         impl<'d, T: Instance> Fdcan<'d, T, fdcan::$from_mode> {
+            /// Transition from $from_mode:ident mode to $to_mode:ident mode
             pub fn $name(self) -> Fdcan<'d, T, fdcan::$to_mode> {
                 Fdcan {
                     can: RefCell::new(self.can.into_inner().$func()),
@@ -390,6 +420,7 @@ impl_transition!(
 );
 
 impl<'d, T: Instance, M: FdcanOperatingMode> Fdcan<'d, T, M> {
+    /// Get mutable reference to instance
     pub fn as_mut(&self) -> RefMut<'_, fdcan::FdCan<FdcanInstance<'d, T>, M>> {
         self.can.borrow_mut()
     }
@@ -424,6 +455,7 @@ where
         .await
     }
 
+    /// Flush one of the TX mailboxes.
     pub async fn flush(&self, mb: fdcan::Mailbox) {
         poll_fn(|cx| {
             T::state().tx_waker.register(cx.waker());
@@ -485,10 +517,13 @@ where
         None
     }
 
+    /// Split instance into separate Tx(write) and Rx(read) portions
     pub fn split<'c>(&'c self) -> (FdcanTx<'c, 'd, T, M>, FdcanRx<'c, 'd, T, M>) {
         (FdcanTx { can: &self.can }, FdcanRx { can: &self.can })
     }
 }
+
+/// FDCAN Tx only Instance
 pub struct FdcanTx<'c, 'd, T: Instance, M: fdcan::Transmit> {
     can: &'c RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
 }
@@ -519,6 +554,7 @@ impl<'c, 'd, T: Instance, M: fdcan::Transmit> FdcanTx<'c, 'd, T, M> {
     }
 }
 
+/// FDCAN Rx only Instance
 #[allow(dead_code)]
 pub struct FdcanRx<'c, 'd, T: Instance, M: fdcan::Receive> {
     can: &'c RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
@@ -679,17 +715,23 @@ pub(crate) mod sealed {
     }
 }
 
+/// Trait for FDCAN interrupt channel 0
 pub trait IT0Instance {
+    /// Type for FDCAN interrupt channel 0
     type IT0Interrupt: crate::interrupt::typelevel::Interrupt;
 }
 
+/// Trait for FDCAN interrupt channel 1
 pub trait IT1Instance {
+    /// Type for FDCAN interrupt channel 1
     type IT1Interrupt: crate::interrupt::typelevel::Interrupt;
 }
 
+/// InterruptableInstance trait
 pub trait InterruptableInstance: IT0Instance + IT1Instance {}
+/// Instance trait
 pub trait Instance: sealed::Instance + RccPeripheral + InterruptableInstance + 'static {}
-
+/// Fdcan Instance struct
 pub struct FdcanInstance<'a, T>(PeripheralRef<'a, T>);
 
 unsafe impl<'d, T: Instance> fdcan::message_ram::Instance for FdcanInstance<'d, T> {
