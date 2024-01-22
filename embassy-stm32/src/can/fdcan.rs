@@ -190,7 +190,7 @@ pub enum BusError {
     /// Bit0Error: During the transmission of a message the device wanted to send a dominant level
     /// but the monitored bus value was recessive.
     BitRecessive,
-    /// Bit1Error: During the transmission of a message the device wanted to send a recessive level 
+    /// Bit1Error: During the transmission of a message the device wanted to send a recessive level
     /// but the monitored bus value was dominant.
     BitDominant,
     /// The CRC check sum of a received message was incorrect. The CRC of an

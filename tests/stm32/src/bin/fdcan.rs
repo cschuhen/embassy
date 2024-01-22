@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
+use defmt::assert;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::can;
-use defmt::assert;
 use embassy_stm32::peripherals::*;
 use embassy_stm32::{bind_interrupts, Config};
 use embassy_time::{Duration, Instant};
@@ -26,7 +26,6 @@ async fn main(_spawner: Spawner) {
     // 250k bps
     can.set_bitrate(250_000);
 
-
     let mut can = can.into_external_loopback_mode();
     //let mut can = can.into_normal_mode();
 
@@ -48,7 +47,6 @@ async fn main(_spawner: Spawner) {
         )
         .unwrap();
 
-
         info!("Transmitting frame...");
         let tx_ts = Instant::now();
         can.write(&tx_frame).await;
@@ -58,12 +56,7 @@ async fn main(_spawner: Spawner) {
         info!("Frame received!");
 
         // Check data.
-        assert!(
-            i == envelope.data()[0],
-            "{} == {}",
-            i,
-            envelope.data()[0]
-        );
+        assert!(i == envelope.data()[0], "{} == {}", i, envelope.data()[0]);
 
         info!("loopback time {}", envelope.header.time_stamp);
         info!("loopback frame {=u8}", envelope.data()[0]);
@@ -92,5 +85,4 @@ async fn main(_spawner: Spawner) {
 
     info!("Test OK");
     cortex_m::asm::bkpt();
-
 }
