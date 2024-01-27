@@ -28,6 +28,9 @@ pub struct RxFrame {
     pub header: RxFrameInfo,
     /// CAN(0-8 bytes) or FDCAN(0-64 bytes) Frame data
     pub data: Data,
+    /// Reception time.
+    #[cfg(feature = "time")]
+    pub timestamp: embassy_time::Instant,
 }
 
 /// CAN frame used for write
@@ -69,10 +72,19 @@ impl TxFrame {
 }
 
 impl RxFrame {
-    pub(crate) fn new(header: RxFrameInfo, data: &[u8]) -> Self {
+    pub(crate) fn new(
+        header: RxFrameInfo,
+        data: &[u8],
+        #[cfg(feature = "time")] timestamp: embassy_time::Instant,
+    ) -> Self {
         let data = Data::new(&data).unwrap_or_else(|| Data::empty());
 
-        RxFrame { header, data }
+        RxFrame {
+            header,
+            data,
+            #[cfg(feature = "time")]
+            timestamp,
+        }
     }
 
     /// Access frame data. Slice length will match header.
@@ -213,6 +225,34 @@ impl FdcanOperatingMode for fdcan::TestMode {}
 pub struct Fdcan<'d, T: Instance, M: FdcanOperatingMode> {
     /// Reference to internals.
     pub can: RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
+    ns_per_timer_tick: u64, // For FDCAN internal timer
+}
+
+fn calc_ns_per_timer_tick<T: Instance>(mode: config::FrameTransmissionConfig) -> u64 {
+    match mode {
+        // Use timestamp from Rx FIFO to adjust timestamp reported to user
+        config::FrameTransmissionConfig::ClassicCanOnly => {
+            let freq = T::frequency();
+            let prescale: u64 =
+                ({ T::regs().nbtp().read().nbrp() } + 1) as u64 * ({ T::regs().tscc().read().tcp() } + 1) as u64;
+            1_000_000_000 as u64 / (freq.0 as u64 * prescale)
+        }
+        // For VBR this is too hard because the FDCAN timer switches clock rate you need to configure to use
+        // timer3 instead which is too hard to do from this module.
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "time")]
+fn calc_timestamp<T: Instance>(ns_per_timer_tick: u64, ts_val: u16) -> embassy_time::Instant {
+    let now_embassy = embassy_time::Instant::now();
+    if ns_per_timer_tick == 0 {
+        return now_embassy;
+    }
+    let now_can = { T::regs().tscv().read().tsc() };
+    let delta = now_can.overflowing_sub(ts_val).0 as u64;
+    let ns = ns_per_timer_tick * delta as u64;
+    now_embassy - embassy_time::Duration::from_nanos(ns)
 }
 
 impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
@@ -240,6 +280,14 @@ impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
 
         T::configure_msg_ram();
         unsafe {
+            // Enable timestamping
+            #[cfg(not(stm32h7))]
+            T::regs()
+                .tscc()
+                .write(|w| w.set_tss(stm32_metapac::can::vals::Tss::INCREMENT));
+            #[cfg(stm32h7)]
+            T::regs().tscc().write(|w| w.set_tss(0x01));
+
             T::IT0Interrupt::unpend(); // Not unsafe
             T::IT0Interrupt::enable();
 
@@ -256,8 +304,12 @@ impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
         can.enable_interrupt_line(fdcan::interrupt::InterruptLine::_0, true);
         can.enable_interrupt_line(fdcan::interrupt::InterruptLine::_1, true);
 
+        let ns_per_timer_tick = calc_ns_per_timer_tick::<T>(can.get_config().frame_transmit);
         let can_ref_cell = RefCell::new(can);
-        Self { can: can_ref_cell }
+        Self {
+            can: can_ref_cell,
+            ns_per_timer_tick,
+        }
     }
 
     /// Configures the bit timings calculated from supplied bitrate.
@@ -277,8 +329,10 @@ macro_rules! impl_transition {
         impl<'d, T: Instance> Fdcan<'d, T, fdcan::$from_mode> {
             /// Transition from $from_mode:ident mode to $to_mode:ident mode
             pub fn $name(self) -> Fdcan<'d, T, fdcan::$to_mode> {
+                let ns_per_timer_tick = calc_ns_per_timer_tick::<T>(self.can.borrow().get_config().frame_transmit);
                 Fdcan {
                     can: RefCell::new(self.can.into_inner().$func()),
+                    ns_per_timer_tick,
                 }
             }
         }
@@ -366,7 +420,13 @@ where
                 // rx: fdcan::ReceiveOverrun<RxFrameInfo>
                 // TODO: report overrun?
                 //  for now we just drop it
-                let frame: RxFrame = RxFrame::new(rx.unwrap(), &buffer);
+
+                let frame: RxFrame = RxFrame::new(
+                    rx.unwrap(),
+                    &buffer,
+                    #[cfg(feature = "time")]
+                    calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
+                );
                 return Poll::Ready(Ok(frame));
             } else if let Some(err) = self.curr_error() {
                 // TODO: this is probably wrong
@@ -402,7 +462,13 @@ where
 
     /// Split instance into separate Tx(write) and Rx(read) portions
     pub fn split<'c>(&'c self) -> (FdcanTx<'c, 'd, T, M>, FdcanRx<'c, 'd, T, M>) {
-        (FdcanTx { can: &self.can }, FdcanRx { can: &self.can })
+        (
+            FdcanTx { can: &self.can },
+            FdcanRx {
+                can: &self.can,
+                ns_per_timer_tick: self.ns_per_timer_tick,
+            },
+        )
     }
 }
 
@@ -441,6 +507,7 @@ impl<'c, 'd, T: Instance, M: fdcan::Transmit> FdcanTx<'c, 'd, T, M> {
 #[allow(dead_code)]
 pub struct FdcanRx<'c, 'd, T: Instance, M: fdcan::Receive> {
     can: &'c RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
+    ns_per_timer_tick: u64, // For FDCAN internal timer
 }
 
 impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
@@ -456,7 +523,12 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
                 // rx: fdcan::ReceiveOverrun<RxFrameInfo>
                 // TODO: report overrun?
                 //  for now we just drop it
-                let frame: RxFrame = RxFrame::new(rx.unwrap(), &buffer);
+                let frame: RxFrame = RxFrame::new(
+                    rx.unwrap(),
+                    &buffer,
+                    #[cfg(feature = "time")]
+                    calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
+                );
                 return Poll::Ready(Ok(frame));
             } else if let Some(err) = self.curr_error() {
                 // TODO: this is probably wrong
