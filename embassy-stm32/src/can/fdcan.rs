@@ -1,4 +1,3 @@
-use core::cell::{RefCell, RefMut};
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
@@ -6,11 +5,10 @@ use core::task::Poll;
 
 use cfg_if::cfg_if;
 use embassy_hal_internal::{into_ref, PeripheralRef};
-use fdcan;
 pub use fdcan::frame::{FrameFormat, RxFrameInfo, TxFrameHeader};
 pub use fdcan::id::{ExtendedId, Id, StandardId};
 use fdcan::message_ram::RegisterBlock;
-use fdcan::LastErrorCode;
+use fdcan::{self, LastErrorCode};
 pub use fdcan::{config, filter};
 
 use crate::gpio::sealed::AFType;
@@ -224,7 +222,7 @@ impl FdcanOperatingMode for fdcan::TestMode {}
 /// FDCAN Instance
 pub struct Fdcan<'d, T: Instance, M: FdcanOperatingMode> {
     /// Reference to internals.
-    pub can: RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
+    pub can: fdcan::FdCan<FdcanInstance<'d, T>, M>,
     ns_per_timer_tick: u64, // For FDCAN internal timer
 }
 
@@ -253,6 +251,29 @@ fn calc_timestamp<T: Instance>(ns_per_timer_tick: u64, ts_val: u16) -> embassy_t
     let delta = now_can.overflowing_sub(ts_val).0 as u64;
     let ns = ns_per_timer_tick * delta as u64;
     now_embassy - embassy_time::Duration::from_nanos(ns)
+}
+
+fn curr_error<T: Instance>() -> Option<BusError> {
+    let err = { T::regs().psr().read() };
+    if err.bo() {
+        return Some(BusError::BusOff);
+    } else if err.ep() {
+        return Some(BusError::BusPassive);
+    } else if err.ew() {
+        return Some(BusError::BusWarning);
+    } else {
+        cfg_if! {
+            if #[cfg(stm32h7)] {
+                let lec = err.lec();
+            } else {
+                let lec = err.lec().to_bits();
+            }
+        }
+        if let Ok(err) = LastErrorCode::try_from(lec) {
+            return BusError::try_from(err);
+        }
+    }
+    None
 }
 
 impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
@@ -300,22 +321,19 @@ impl<'d, T: Instance> Fdcan<'d, T, fdcan::ConfigMode> {
         }
 
         can.enable_interrupt(fdcan::interrupt::Interrupt::RxFifo0NewMsg);
+        can.enable_interrupt(fdcan::interrupt::Interrupt::RxFifo1NewMsg);
         can.enable_interrupt(fdcan::interrupt::Interrupt::TxComplete);
         can.enable_interrupt_line(fdcan::interrupt::InterruptLine::_0, true);
         can.enable_interrupt_line(fdcan::interrupt::InterruptLine::_1, true);
 
         let ns_per_timer_tick = calc_ns_per_timer_tick::<T>(can.get_config().frame_transmit);
-        let can_ref_cell = RefCell::new(can);
-        Self {
-            can: can_ref_cell,
-            ns_per_timer_tick,
-        }
+        Self { can, ns_per_timer_tick }
     }
 
     /// Configures the bit timings calculated from supplied bitrate.
     pub fn set_bitrate(&mut self, bitrate: u32) {
         let bit_timing = util::calc_can_timings(T::frequency(), bitrate).unwrap();
-        self.can.borrow_mut().set_nominal_bit_timing(config::NominalBitTiming {
+        self.can.set_nominal_bit_timing(config::NominalBitTiming {
             sync_jump_width: bit_timing.sync_jump_width,
             prescaler: bit_timing.prescaler,
             seg1: bit_timing.seg1,
@@ -329,9 +347,9 @@ macro_rules! impl_transition {
         impl<'d, T: Instance> Fdcan<'d, T, fdcan::$from_mode> {
             /// Transition from $from_mode:ident mode to $to_mode:ident mode
             pub fn $name(self) -> Fdcan<'d, T, fdcan::$to_mode> {
-                let ns_per_timer_tick = calc_ns_per_timer_tick::<T>(self.can.borrow().get_config().frame_transmit);
+                let ns_per_timer_tick = calc_ns_per_timer_tick::<T>(self.can.get_config().frame_transmit);
                 Fdcan {
-                    can: RefCell::new(self.can.into_inner().$func()),
+                    can: self.can.$func(),
                     ns_per_timer_tick,
                 }
             }
@@ -356,13 +374,6 @@ impl_transition!(
     into_internal_loopback
 );
 
-impl<'d, T: Instance, M: FdcanOperatingMode> Fdcan<'d, T, M> {
-    /// Get mutable reference to instance
-    pub fn as_mut(&self) -> RefMut<'_, fdcan::FdCan<FdcanInstance<'d, T>, M>> {
-        self.can.borrow_mut()
-    }
-}
-
 impl<'d, T: Instance, M: FdcanOperatingMode> Fdcan<'d, T, M>
 where
     M: fdcan::Transmit,
@@ -375,12 +386,11 @@ where
     pub async fn write(&mut self, frame: &TxFrame) -> Option<TxFrame> {
         poll_fn(|cx| {
             T::state().tx_waker.register(cx.waker());
-            if let Ok(dropped) =
-                self.can
-                    .borrow_mut()
-                    .transmit_preserve(frame.header, &frame.data.bytes, &mut |_, hdr, data32| {
-                        TxFrame::from_preserved(hdr, data32)
-                    })
+            if let Ok(dropped) = self
+                .can
+                .transmit_preserve(frame.header, &frame.data.bytes, &mut |_, hdr, data32| {
+                    TxFrame::from_preserved(hdr, data32)
+                })
             {
                 return Poll::Ready(dropped.flatten());
             }
@@ -414,9 +424,8 @@ where
             T::state().err_waker.register(cx.waker());
             T::state().rx_waker.register(cx.waker());
 
-            // TODO: handle fifo0 AND fifo1
             let mut buffer: [u8; 64] = [0; 64];
-            if let Ok(rx) = self.can.borrow_mut().receive0(&mut buffer) {
+            if let Ok(rx) = self.can.receive0(&mut buffer) {
                 // rx: fdcan::ReceiveOverrun<RxFrameInfo>
                 // TODO: report overrun?
                 //  for now we just drop it
@@ -428,44 +437,35 @@ where
                     calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
                 );
                 return Poll::Ready(Ok(frame));
-            } else if let Some(err) = self.curr_error() {
+            } else if let Ok(rx) = self.can.receive1(&mut buffer) {
+                // rx: fdcan::ReceiveOverrun<RxFrameInfo>
+                // TODO: report overrun?
+                //  for now we just drop it
+
+                let frame: RxFrame = RxFrame::new(
+                    rx.unwrap(),
+                    &buffer,
+                    #[cfg(feature = "time")]
+                    calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
+                );
+                return Poll::Ready(Ok(frame));
+            } else if let Some(err) = curr_error::<T>() {
                 // TODO: this is probably wrong
                 return Poll::Ready(Err(err));
             }
-
             Poll::Pending
         })
         .await
     }
-    fn curr_error(&self) -> Option<BusError> {
-        let err = { T::regs().psr().read() };
-        if err.bo() {
-            return Some(BusError::BusOff);
-        } else if err.ep() {
-            return Some(BusError::BusPassive);
-        } else if err.ew() {
-            return Some(BusError::BusWarning);
-        } else {
-            cfg_if! {
-                if #[cfg(stm32h7)] {
-                    let lec = err.lec();
-                } else {
-                    let lec = err.lec().to_bits();
-                }
-            }
-            if let Ok(err) = LastErrorCode::try_from(lec) {
-                return BusError::try_from(err);
-            }
-        }
-        None
-    }
 
     /// Split instance into separate Tx(write) and Rx(read) portions
-    pub fn split<'c>(&'c self) -> (FdcanTx<'c, 'd, T, M>, FdcanRx<'c, 'd, T, M>) {
+    pub fn split<'c>(&'c mut self) -> (FdcanTx<'c, 'd, T, M>, FdcanRx<'c, 'd, T, M>) {
+        let (mut _control, tx, rx0, rx1) = self.can.split_by_ref();
         (
-            FdcanTx { can: &self.can },
+            FdcanTx { _control, tx },
             FdcanRx {
-                can: &self.can,
+                rx0,
+                rx1,
                 ns_per_timer_tick: self.ns_per_timer_tick,
             },
         )
@@ -474,7 +474,8 @@ where
 
 /// FDCAN Tx only Instance
 pub struct FdcanTx<'c, 'd, T: Instance, M: fdcan::Transmit> {
-    can: &'c RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
+    _control: &'c mut fdcan::FdCanControl<FdcanInstance<'d, T>, M>,
+    tx: &'c mut fdcan::Tx<FdcanInstance<'d, T>, M>,
 }
 
 impl<'c, 'd, T: Instance, M: fdcan::Transmit> FdcanTx<'c, 'd, T, M> {
@@ -485,12 +486,11 @@ impl<'c, 'd, T: Instance, M: fdcan::Transmit> FdcanTx<'c, 'd, T, M> {
     pub async fn write(&mut self, frame: &TxFrame) -> Option<TxFrame> {
         poll_fn(|cx| {
             T::state().tx_waker.register(cx.waker());
-            if let Ok(dropped) =
-                self.can
-                    .borrow_mut()
-                    .transmit_preserve(frame.header, &frame.data.bytes, &mut |_, hdr, data32| {
-                        TxFrame::from_preserved(hdr, data32)
-                    })
+            if let Ok(dropped) = self
+                .tx
+                .transmit_preserve(frame.header, &frame.data.bytes, &mut |_, hdr, data32| {
+                    TxFrame::from_preserved(hdr, data32)
+                })
             {
                 return Poll::Ready(dropped.flatten());
             }
@@ -506,7 +506,8 @@ impl<'c, 'd, T: Instance, M: fdcan::Transmit> FdcanTx<'c, 'd, T, M> {
 /// FDCAN Rx only Instance
 #[allow(dead_code)]
 pub struct FdcanRx<'c, 'd, T: Instance, M: fdcan::Receive> {
-    can: &'c RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>,
+    rx0: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo0>,
+    rx1: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo1>,
     ns_per_timer_tick: u64, // For FDCAN internal timer
 }
 
@@ -517,9 +518,8 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
             T::state().err_waker.register(cx.waker());
             T::state().rx_waker.register(cx.waker());
 
-            // TODO: handle fifo0 AND fifo1
             let mut buffer: [u8; 64] = [0; 64];
-            if let Ok(rx) = self.can.borrow_mut().receive0(&mut buffer) {
+            if let Ok(rx) = self.rx0.receive(&mut buffer) {
                 // rx: fdcan::ReceiveOverrun<RxFrameInfo>
                 // TODO: report overrun?
                 //  for now we just drop it
@@ -530,7 +530,18 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
                     calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
                 );
                 return Poll::Ready(Ok(frame));
-            } else if let Some(err) = self.curr_error() {
+            } else if let Ok(rx) = self.rx1.receive(&mut buffer) {
+                // rx: fdcan::ReceiveOverrun<RxFrameInfo>
+                // TODO: report overrun?
+                //  for now we just drop it
+                let frame: RxFrame = RxFrame::new(
+                    rx.unwrap(),
+                    &buffer,
+                    #[cfg(feature = "time")]
+                    calc_timestamp::<T>(self.ns_per_timer_tick, rx.unwrap().time_stamp),
+                );
+                return Poll::Ready(Ok(frame));
+            } else if let Some(err) = curr_error::<T>() {
                 // TODO: this is probably wrong
                 return Poll::Ready(Err(err));
             }
@@ -539,32 +550,9 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
         })
         .await
     }
-
-    fn curr_error(&self) -> Option<BusError> {
-        let err = { T::regs().psr().read() };
-        if err.bo() {
-            return Some(BusError::BusOff);
-        } else if err.ep() {
-            return Some(BusError::BusPassive);
-        } else if err.ew() {
-            return Some(BusError::BusWarning);
-        } else {
-            cfg_if! {
-                if #[cfg(stm32h7)] {
-                    let lec = err.lec();
-                } else {
-                    let lec = err.lec().to_bits();
-                }
-            }
-            if let Ok(err) = LastErrorCode::try_from(lec) {
-                return BusError::try_from(err);
-            }
-        }
-        None
-    }
 }
 impl<'d, T: Instance, M: FdcanOperatingMode> Deref for Fdcan<'d, T, M> {
-    type Target = RefCell<fdcan::FdCan<FdcanInstance<'d, T>, M>>;
+    type Target = fdcan::FdCan<FdcanInstance<'d, T>, M>;
 
     fn deref(&self) -> &Self::Target {
         &self.can
