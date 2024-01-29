@@ -1,3 +1,5 @@
+use core::borrow::BorrowMut;
+use core::cell::RefCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
@@ -15,6 +17,10 @@ use crate::gpio::sealed::AFType;
 use crate::interrupt::typelevel::Interrupt;
 use crate::rcc::RccPeripheral;
 use crate::{interrupt, peripherals, Peripheral};
+use embassy_sync::channel::Channel;
+use embassy_sync::channel::Sender;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
 
 pub mod enums;
 use enums::*;
@@ -173,12 +179,22 @@ impl<T: Instance> interrupt::typelevel::Handler<T::IT0Interrupt> for IT0Interrup
 
         if ir.rfn(0) {
             regs.ir().write(|w| w.set_rfn(0, true));
-            T::state().rx_waker.wake();
+            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
+            //    sealed::RxMode::NonBuffered(waker) => {waker.wake()},
+            //    sealed::RxMode::ClassicBuffered(_buf) => {
+            //        
+
+            //    },
+            //}
         }
 
         if ir.rfn(1) {
             regs.ir().write(|w| w.set_rfn(1, true));
-            T::state().rx_waker.wake();
+            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
+            //    sealed::RxMode::NonBuffered(waker) => {waker.wake()},
+            //    sealed::RxMode::ClassicBuffered(_buf) => {
+            //    },
+            //}
         }
     }
 }
@@ -422,7 +438,10 @@ where
     pub async fn read(&mut self) -> Result<RxFrame, BusError> {
         poll_fn(|cx| {
             T::state().err_waker.register(cx.waker());
-            T::state().rx_waker.register(cx.waker());
+            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
+            //    sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
+            //    sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
+            //}
 
             let mut buffer: [u8; 64] = [0; 64];
             if let Ok(rx) = self.can.receive0(&mut buffer) {
@@ -470,7 +489,243 @@ where
             },
         )
     }
+
+    /// Return a buffered instance of driver.
+    pub fn buffered<'c>(&'c mut self) -> BufferedFdcan<'c, 'd, T, M> {
+//                static mut STATE: sealed::State = sealed::State::new();
+        static rx_buf: ClassicRxBuf = ClassicRxBuf::new();
+        // TO TRY MAKE A STATIC HERE TODO FIXME
+        BufferedFdcan::new(
+            &mut self.can,
+            & rx_buf,
+            self.ns_per_timer_tick,
+        )
+    }
 }
+
+
+/// Header of a Received Frame
+#[derive(Debug, Copy, Clone)]
+pub struct Header {
+    /// Length in bytes
+    pub len: u8,
+    /// Frame Format
+    pub frame_format: FrameFormat,
+    /// Id
+    pub id: embedded_can::Id,
+    /// Is this an Remote Transmit Request
+    pub rtr: bool,
+}
+
+
+/// Payload of a (FD)CAN data frame.
+///
+/// Contains 0 to 64 Bytes of data.
+#[derive(Debug, Copy, Clone)]
+pub struct ClassicData {
+    pub(crate) bytes: [u8; 8],
+}
+
+impl ClassicData {
+    /// Creates a data payload from a raw byte slice.
+    ///
+    /// Returns `None` if `data` is more than 64 bytes (which is the maximum) or
+    /// cannot be represented with an FDCAN DLC.
+    pub fn new(data: &[u8]) -> Option<Self> {
+        if !Data::is_valid_len(data.len()) {
+            return None;
+        }
+
+        let mut bytes = [0; 8];
+        bytes[..data.len()].copy_from_slice(data);
+
+        Some(Self { bytes })
+    }
+
+    /// Raw read access to data.
+    pub fn raw(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Checks if the length can be encoded in FDCAN DLC field.
+    pub const fn is_valid_len(len: usize) -> bool {
+        match len {
+            0..=8 => true,
+            12 => true,
+            16 => true,
+            20 => true,
+            24 => true,
+            32 => true,
+            48 => true,
+            64 => true,
+            _ => false,
+        }
+    }
+
+    /// Creates an empty data payload containing 0 bytes.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self { bytes: [0; 8] }
+    }
+}
+
+/// Classic CAN Frame for reception. smaller than FDCAN used embedded hal ID
+pub struct ClassicRxFrame {
+    /// CAN Header info: frame ID, data length and other meta
+    pub header: Header,
+    /// CAN(0-8 bytes) or FDCAN(0-64 bytes) Frame data
+    pub data: ClassicData,
+    /// Reception time.
+    #[cfg(feature = "time")]
+    pub timestamp: embassy_time::Instant,
+}
+
+impl ClassicRxFrame {
+    pub(crate) fn new(
+        header: Header,
+        data: &[u8],
+        #[cfg(feature = "time")] timestamp: embassy_time::Instant,
+    ) -> Self {
+        let data = ClassicData::new(&data).unwrap_or_else(|| ClassicData::empty());
+
+        ClassicRxFrame {
+            header,
+            data,
+            #[cfg(feature = "time")]
+            timestamp,
+        }
+    }
+
+    /// Access frame data. Slice length will match header.
+    pub fn data(&self) -> &[u8] {
+        &self.data.bytes[..(self.header.len as usize)]
+    }
+}
+
+
+/// CAN frame used for write
+pub struct ClassicTxFrame {
+    /// CAN Header info: frame ID, data length and other meta
+    pub header: Header,
+    /// CAN(0-8 bytes) or FDCAN(0-64 bytes) Frame data
+    pub data: ClassicData,
+}
+
+type ClassicRxBuf = Channel<
+    CriticalSectionRawMutex,
+    ClassicRxFrame,
+    32>;
+
+
+/// Buffered FDCAN Instance
+pub struct BufferedFdcan<'c, 'd, T: Instance, M: FdcanOperatingMode> {
+    /// Reference to internals.
+    //pub can: fdcan::FdCan<FdcanInstance<'d, T>, M>,
+    tx: &'c mut fdcan::Tx<FdcanInstance<'d, T>, M>,
+    rx0: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo0>,
+    rx1: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo1>,
+    ns_per_timer_tick: u64, // For FDCAN internal timer
+    rx_buf: &'static ClassicRxBuf,
+    //rx_sender: Sender<'c, CriticalSectionRawMutex, ClassicRxFrame, 32>,
+}
+
+struct Inner {
+    //rx_buf: ClassicRxBuf,
+    rx_sender: Sender<'static, CriticalSectionRawMutex, ClassicRxFrame, 32>,
+    //rx_buf: & 'static ClassicRxBuf,
+
+}
+
+impl<'c, 'd, T: Instance, M: FdcanOperatingMode> BufferedFdcan<'c, 'd, T, M>
+where
+    M: fdcan::Transmit,
+    M: fdcan::Receive,
+{
+    //pub fn split<'c>(&'c mut self) -> (FdcanTx<'c, 'd, T, M>, FdcanRx<'c, 'd, T, M>) {
+    fn new(can: & 'c mut fdcan::FdCan<FdcanInstance<'d, T>, M>,
+            rx_buf: & 'static ClassicRxBuf,
+            ns_per_timer_tick: u64)-> BufferedFdcan<'c, 'd, T, M> {
+
+
+        
+        //let inner = Inner{rx_buf: ClassicRxBuf::new()};
+
+        //T::state().rx_mode = sealed::RxMode::ClassicBuffered(ClassicTxBuf::new());
+        can.disable_interrupt(fdcan::interrupt::Interrupt::TxComplete);
+        can.enable_interrupt(fdcan::interrupt::Interrupt::TxComplete);
+        //T::state().rx_mode.lock(|var| {
+        //    var = sealed::ModeRef::new(sealed::RxMode::ClassicBuffered(ClassicTxBuf::new()));
+        //});
+        //T::state().rx_mode = sealed::RxMode::ClassicBuffered(ClassicTxBuf::new());
+
+        let (mut _control, tx, rx0, rx1) = can.split_by_ref();
+        
+        //let rx_buf: ClassicRxBuf::new();
+        let mut ret = BufferedFdcan{
+            tx,
+            rx0,
+            rx1,
+            ns_per_timer_tick,
+            //rx_buf,
+            rx_buf,
+            //rx_sender: rx_buf.sender(),
+        };
+        ret.setup();
+        ret
+    }
+
+    fn setup(&mut self) {
+
+        critical_section::with(|_| unsafe {
+            //let inner = Inner{rx_sender: self.rx_buf.sender()};
+            let inner = Inner{rx_sender: self.rx_buf.sender()};
+            T::mut_state().rx_mode = sealed::RxMode::ClassicBuffered(inner);
+        });
+    }
+
+     pub async fn write(&mut self, frame: &TxFrame) -> Option<TxFrame> {
+        poll_fn(|cx| {
+            T::state().tx_waker.register(cx.waker());
+            if let Ok(dropped) = self
+                .tx
+                .transmit_preserve(frame.header, &frame.data.bytes, &mut |_, hdr, data32| {
+                    TxFrame::from_preserved(hdr, data32)
+                })
+            {
+                return Poll::Ready(dropped.flatten());
+            }
+
+            // Couldn't replace any lower priority frames.  Need to wait for some mailboxes
+            // to clear.
+            Poll::Pending
+        })
+        .await
+    }   
+
+    /// Flush one of the TX mailboxes.
+    pub async fn flush(&self, mb: fdcan::Mailbox) {
+        poll_fn(|cx| {
+            T::state().tx_waker.register(cx.waker());
+
+            let idx: u8 = mb.into();
+            let idx = 1 << idx;
+            if !T::regs().txbrp().read().trp(idx) {
+                return Poll::Ready(());
+            }
+
+            Poll::Pending
+        })
+        .await;
+    }
+
+    pub async fn read(&mut self) -> Result<ClassicRxFrame, BusError> {
+        Ok(self.rx_buf.receive().await)
+    }
+
+
+}
+
+
 
 /// FDCAN Tx only Instance
 pub struct FdcanTx<'c, 'd, T: Instance, M: fdcan::Transmit> {
@@ -516,7 +771,10 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
     pub async fn read(&mut self) -> Result<RxFrame, BusError> {
         poll_fn(|cx| {
             T::state().err_waker.register(cx.waker());
-            T::state().rx_waker.register(cx.waker());
+            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
+            //    sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
+            //    sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
+            //}
 
             let mut buffer: [u8; 64] = [0; 64];
             if let Ok(rx) = self.rx0.receive(&mut buffer) {
@@ -566,20 +824,35 @@ impl<'d, T: Instance, M: FdcanOperatingMode> DerefMut for Fdcan<'d, T, M> {
 }
 
 pub(crate) mod sealed {
+    use core::cell::RefCell;
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::mutex::Mutex;
+
     use embassy_sync::waitqueue::AtomicWaker;
+
+    use super::{Inner};
+
+    pub enum RxMode {
+        NonBuffered(AtomicWaker),
+        ClassicBuffered(Inner),
+    }
+    pub type ModeRef = Mutex<CriticalSectionRawMutex, RefCell<RxMode>>;
 
     pub struct State {
         pub tx_waker: AtomicWaker,
+        pub rx_mode: RxMode,
+        //pub rx_mode:  core::cell::RefCell<RxMode>,
+        //pub rx_mode:  ModeRef,
         pub err_waker: AtomicWaker,
-        pub rx_waker: AtomicWaker,
     }
 
     impl State {
         pub const fn new() -> Self {
             Self {
                 tx_waker: AtomicWaker::new(),
+                rx_mode: RxMode::NonBuffered(AtomicWaker::new()),
+                //rx_mode: ModeRef::new(RefCell::new(RxMode::NonBuffered(AtomicWaker::new()))),
                 err_waker: AtomicWaker::new(),
-                rx_waker: AtomicWaker::new(),
             }
         }
     }
@@ -591,6 +864,7 @@ pub(crate) mod sealed {
 
         fn regs() -> &'static crate::pac::can::Fdcan;
         fn state() -> &'static State;
+        unsafe fn mut_state() -> & 'static mut State;
 
         #[cfg(not(stm32h7))]
         fn configure_msg_ram() {}
@@ -699,9 +973,13 @@ macro_rules! impl_fdcan {
                 &crate::pac::$inst
             }
 
+            unsafe fn mut_state() -> & 'static mut sealed::State {
+                static mut STATE: sealed::State = sealed::State::new();
+                & mut STATE
+            }
+
             fn state() -> &'static sealed::State {
-                static STATE: sealed::State = sealed::State::new();
-                &STATE
+                unsafe { peripherals::$inst::mut_state() }
             }
         }
 

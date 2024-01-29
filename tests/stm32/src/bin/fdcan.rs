@@ -188,6 +188,59 @@ async fn main(_spawner: Spawner) {
         }
     }
 
+    let mut bcan = can.buffered();
+    // Buffered CAN
+    for i in 0..3 {
+        // Try filling up the RX FIFO0 buffers with standard packets
+        let tx_frame = can::TxFrame::new(
+            can::TxFrameHeader {
+                len: 1,
+                frame_format: can::FrameFormat::Standard,
+                id: can::StandardId::new(0x123).unwrap().into(),
+                bit_rate_switching: false,
+                marker: None,
+            },
+            &[i],
+        )
+        .unwrap();
+        info!("Transmitting frame {}", i);
+        bcan.write(&tx_frame).await;
+    }
+    for i in 3..6 {
+        // Try filling up the RX FIFO0 buffers with extended packets
+        let tx_frame = can::TxFrame::new(
+            can::TxFrameHeader {
+                len: 1,
+                frame_format: can::FrameFormat::Standard,
+                id: can::ExtendedId::new(0x1232344).unwrap().into(),
+                bit_rate_switching: false,
+                marker: None,
+            },
+            &[i],
+        )
+        .unwrap();
+
+        info!("Transmitting frame {}", i);
+        bcan.write(&tx_frame).await;
+    }
+
+    // Try and receive all 6 packets
+    for i in 0..6 {
+        let envelope = bcan.read().await.unwrap();
+        match envelope.header.id {
+            embedded_can::Id::Extended(id) => {
+                info!("Extended received! {:x} {} {}", id.as_raw(), envelope.data()[0], i);
+            }
+            embedded_can::Id::Standard(id) => {
+                info!("Standard received! {:x} {} {}", id.as_raw(), envelope.data()[0], i);
+            }
+        }
+    }
+
+
+
+/*
+
     // Test again with a split
     let (mut tx, mut rx) = can.split();
     for i in 0..3 {
@@ -237,6 +290,7 @@ async fn main(_spawner: Spawner) {
             }
         }
     }
+*/
 
     info!("Test OK");
     cortex_m::asm::bkpt();
