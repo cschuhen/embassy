@@ -28,8 +28,7 @@ async fn main(_spawner: Spawner) {
     //let mut can = can.into_external_loopback_mode();
     let mut can = can.into_normal_mode();
 
-    let mut i = 0;
-    loop {
+    for i in 0..3 {
         let frame = can::TxFrame::new(
             can::TxFrameHeader {
                 len: 1,
@@ -45,12 +44,43 @@ async fn main(_spawner: Spawner) {
         _ = can.write(&frame).await;
 
         match can.read().await {
-            Ok(rx_frame) => info!("Rx: {}", rx_frame.data()[0]),
+            Ok(rx_frame) => info!("OldRx: {}", rx_frame.data()[0]),
             Err(_err) => error!("Error in frame"),
         }
 
         Timer::after_millis(250).await;
 
-        i += 1;
+    }
+
+    info!("\n\n\nBuffered");
+    let mut can = can.buffered();
+
+    loop {
+        /*
+        let frame = can::TxFrame::new(
+            can::TxFrameHeader {
+                len: 1,
+                frame_format: can::FrameFormat::Standard,
+                id: can::StandardId::new(0x123).unwrap().into(),
+                bit_rate_switching: false,
+                marker: None,
+            },
+            &[i],
+        )
+        .unwrap();
+        info!("Writing frame");
+        _ = can.write(&frame).await;
+        _ = can.write(&frame).await;
+        _ = can.write(&frame).await;
+         */
+
+        //match can.read().await {
+        //let pkt = can.rx_buf.receive().await;
+        //info!("Rx: {}", pkt.data()[0]);
+
+        match can.read().await {
+            Ok(rx_frame) => info!("Rx: {}", rx_frame.data()[0]),
+            Err(_err) => error!("Error in frame"),
+        }
     }
 }

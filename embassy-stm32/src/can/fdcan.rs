@@ -4,6 +4,7 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::task::Poll;
+use core::convert::Infallible;
 
 use cfg_if::cfg_if;
 use embassy_hal_internal::{into_ref, PeripheralRef};
@@ -179,22 +180,31 @@ impl<T: Instance> interrupt::typelevel::Handler<T::IT0Interrupt> for IT0Interrup
 
         if ir.rfn(0) {
             regs.ir().write(|w| w.set_rfn(0, true));
-            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
-            //    sealed::RxMode::NonBuffered(waker) => {waker.wake()},
-            //    sealed::RxMode::ClassicBuffered(_buf) => {
-            //        
+            match &T::state().rx_mode {
+                sealed::RxMode::NonBuffered(waker) => {
+                    info!("Wake1");
+                    waker.wake()},
+                sealed::RxMode::ClassicBuffered(_buf) => {
+                    //let mut buffer: [u8; 64] = [0; 64];
+                    //unsafe { fdcan::Rx::<T, fdcan::Receive, fdcan::Fifo0>::conjure().receive(buffer) }
+                    //if let Ok(rx) = T::receive0(&mut buffer) {
+                    //    info!("Got1");
+                    //}
 
-            //    },
-            //}
+                },
+            }
         }
 
         if ir.rfn(1) {
             regs.ir().write(|w| w.set_rfn(1, true));
-            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
-            //    sealed::RxMode::NonBuffered(waker) => {waker.wake()},
-            //    sealed::RxMode::ClassicBuffered(_buf) => {
-            //    },
-            //}
+            match &T::state().rx_mode {
+                sealed::RxMode::NonBuffered(waker) => {
+                    info!("Wake2");
+                    waker.wake()
+                },
+                sealed::RxMode::ClassicBuffered(_buf) => {
+                },
+            }
         }
     }
 }
@@ -438,10 +448,10 @@ where
     pub async fn read(&mut self) -> Result<RxFrame, BusError> {
         poll_fn(|cx| {
             T::state().err_waker.register(cx.waker());
-            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
-            //    sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
-            //    sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
-            //}
+            match &T::state().rx_mode {
+                sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
+                sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
+            }
 
             let mut buffer: [u8; 64] = [0; 64];
             if let Ok(rx) = self.can.receive0(&mut buffer) {
@@ -616,21 +626,67 @@ type ClassicRxBuf = Channel<
     ClassicRxFrame,
     32>;
 
+pub trait RawReader {
+    fn receive(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> nb::Result<fdcan::ReceiveOverrun<RxFrameInfo>, Infallible>;
+}
+
+struct Reader<'c, 'd, T: Instance, M: FdcanOperatingMode, F: fdcan::FifoNr> {
+    rx: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, F>,
+}
+
+impl<'c, 'd, T: Instance, M: FdcanOperatingMode, F: fdcan::FifoNr> Reader<'c, 'd, T, M, F> {
+    fn new(rx: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, F>
+
+    ) ->Self {
+        Reader{rx}
+    }
+}
+
+
+impl<'c, 'd, T: Instance, M: FdcanOperatingMode, F: fdcan::FifoNr> RawReader for fdcan::Rx<FdcanInstance<'d, T>, M, F>
+{
+
+    fn receive(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> nb::Result<fdcan::ReceiveOverrun<RxFrameInfo>, Infallible> {
+        self.receive(buffer)
+    }
+}
+
+
+impl<'c, 'd, T: Instance, M: FdcanOperatingMode, F: fdcan::FifoNr> RawReader for Reader<'c, 'd, T, M, F> {
+
+    fn receive(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> nb::Result<fdcan::ReceiveOverrun<RxFrameInfo>, Infallible> {
+        self.rx.receive(buffer)
+    }
+}
 
 /// Buffered FDCAN Instance
 pub struct BufferedFdcan<'c, 'd, T: Instance, M: FdcanOperatingMode> {
     /// Reference to internals.
     //pub can: fdcan::FdCan<FdcanInstance<'d, T>, M>,
     tx: &'c mut fdcan::Tx<FdcanInstance<'d, T>, M>,
+    //rx0: Reader<'c, 'd, T, M, fdcan::Fifo0>,
     rx0: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo0>,
     rx1: &'c mut fdcan::Rx<FdcanInstance<'d, T>, M, fdcan::Fifo1>,
     ns_per_timer_tick: u64, // For FDCAN internal timer
-    rx_buf: &'static ClassicRxBuf,
+    pub rx_buf: &'static ClassicRxBuf,
     //rx_sender: Sender<'c, CriticalSectionRawMutex, ClassicRxFrame, 32>,
 }
 
-struct Inner {
+
+
+struct CBInner {
     //rx_buf: ClassicRxBuf,
+    //rx0: dyn RawReader,
+    //rx0: &mut dyn RawReader,
     rx_sender: Sender<'static, CriticalSectionRawMutex, ClassicRxFrame, 32>,
     //rx_buf: & 'static ClassicRxBuf,
 
@@ -663,6 +719,7 @@ where
         //let rx_buf: ClassicRxBuf::new();
         let mut ret = BufferedFdcan{
             tx,
+            //rx0: Reader::new(rx0),
             rx0,
             rx1,
             ns_per_timer_tick,
@@ -678,7 +735,7 @@ where
 
         critical_section::with(|_| unsafe {
             //let inner = Inner{rx_sender: self.rx_buf.sender()};
-            let inner = Inner{rx_sender: self.rx_buf.sender()};
+            let inner = CBInner{rx_sender: self.rx_buf.sender()};
             T::mut_state().rx_mode = sealed::RxMode::ClassicBuffered(inner);
         });
     }
@@ -771,10 +828,10 @@ impl<'c, 'd, T: Instance, M: fdcan::Receive> FdcanRx<'c, 'd, T, M> {
     pub async fn read(&mut self) -> Result<RxFrame, BusError> {
         poll_fn(|cx| {
             T::state().err_waker.register(cx.waker());
-            //match T::state().rx_mode.try_lock().unwrap().borrow().deref() {
-            //    sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
-            //    sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
-            //}
+            match &T::state().rx_mode {
+                sealed::RxMode::NonBuffered(waker) => {waker.register(cx.waker())},
+                sealed::RxMode::ClassicBuffered(_buf) => {panic!("Bad Mode")},
+            }
 
             let mut buffer: [u8; 64] = [0; 64];
             if let Ok(rx) = self.rx0.receive(&mut buffer) {
@@ -830,11 +887,11 @@ pub(crate) mod sealed {
 
     use embassy_sync::waitqueue::AtomicWaker;
 
-    use super::{Inner};
+    use super::{CBInner};
 
     pub enum RxMode {
         NonBuffered(AtomicWaker),
-        ClassicBuffered(Inner),
+        ClassicBuffered(CBInner),
     }
     pub type ModeRef = Mutex<CriticalSectionRawMutex, RefCell<RxMode>>;
 
