@@ -29,8 +29,6 @@ mod frame;
 mod id;
 
 #[allow(clippy::all)] // generated code
-mod pac;
-
 use core::cmp::{Ord, Ordering};
 use core::convert::{Infallible, TryInto};
 use core::marker::PhantomData;
@@ -38,10 +36,8 @@ use core::mem;
 
 pub use id::{ExtendedId, Id, StandardId};
 
-use self::pac::generic::*;
 use crate::can::bx::filter::MasterFilters;
 pub use crate::can::bx::frame::{Data, Frame, FramePriority};
-pub use crate::can::bx::pac::can::RegisterBlock; // To make the PAC extraction build
 
 /// A bxCAN peripheral instance.
 ///
@@ -56,10 +52,7 @@ pub use crate::can::bx::pac::can::RegisterBlock; // To make the PAC extraction b
 ///   register block.
 /// * `REGISTERS` is a pointer to that peripheral's register block and can be safely accessed for as
 ///   long as ownership or a borrow of the implementing type is present.
-pub unsafe trait Instance {
-    /// Pointer to the instance's register block.
-    const REGISTERS: *mut RegisterBlock;
-}
+pub unsafe trait Instance {}
 
 /// A bxCAN instance that owns filter banks.
 ///
@@ -621,7 +614,7 @@ where
         unsafe { Rx1::conjure(self.canregs) }
     }
 
-    pub fn split_by_ref(&mut self) -> (Tx<I>, Rx0<I>, Rx1<I>) {
+    pub(crate) fn split_by_ref(&mut self) -> (Tx<I>, Rx0<I>, Rx1<I>) {
         // Safety: We take `&mut self` and the return value lifetimes are tied to `self`'s lifetime.
         let tx = unsafe { Tx::conjure(self.canregs) };
         let rx0 = unsafe { Rx0::conjure(self.canregs) };
@@ -924,7 +917,9 @@ fn receive_fifo(canregs: crate::pac::can::Can, fifo_nr: usize) -> nb::Result<Fra
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Fifo {
+    /// First receive FIFO
     Fifo0 = 0,
+    /// Second receive FIFO
     Fifo1 = 1,
 }
 
