@@ -357,13 +357,13 @@ impl<'d, T: Instance> Can<'d, T> {
         (
             CanTx {
                 config: self.config,
-                _instance: self.instance,
-                _mode: self._mode,
+                instance: self.instance,
+                mode: self._mode,
             },
             CanRx {
-                _instance1: PhantomData::<T>,
-                _instance2: T::regs(),
-                _mode: self._mode,
+                instance1: PhantomData::<T>,
+                instance2: T::regs(),
+                mode: self._mode,
             },
         )
     }
@@ -373,8 +373,8 @@ impl<'d, T: Instance> Can<'d, T> {
         Can {
             config: tx.config,
             //_instance2: T::regs(),
-            instance: tx._instance,
-            _mode: rx._mode,
+            instance: tx.instance,
+            _mode: rx.mode,
         }
     }
 
@@ -402,6 +402,128 @@ pub type RxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Result<
 
 /// User supplied buffer for TX buffering
 pub type TxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Frame, BUF_SIZE>;
+
+/// Buffered Rx Instance
+pub struct BufferedCanRx<'d, T: Instance, const RX_BUF_SIZE: usize> {
+    _instance1: PhantomData<T>,
+    _instance2: &'d crate::pac::can::Fdcan,
+    _mode: OperatingMode,
+    rx_buf: &'static RxBuf<RX_BUF_SIZE>,
+}
+
+impl<'c, 'd, T: Instance, const RX_BUF_SIZE: usize>
+    BufferedCanRx<'d, T, RX_BUF_SIZE>
+{
+    fn new(
+        _instance1: PhantomData<T>,
+        _instance2: &'d crate::pac::can::Fdcan,
+        _mode: OperatingMode,
+        rx_buf: &'static RxBuf<RX_BUF_SIZE>,
+    ) -> Self {
+        BufferedCanRx {
+            _instance1,
+            _instance2,
+            _mode,
+            rx_buf,
+        }
+        .setup()
+    }
+
+    fn setup(self) -> Self {
+        // We don't want interrupts being processed while we change modes.
+        critical_section::with(|_| unsafe {
+            let rx_inner = self::common::ClassicBufferedRxInner {
+                rx_sender: self.rx_buf.sender().into(),
+            };
+            T::mut_state().rx_mode = RxMode::ClassicBuffered(rx_inner);
+        });
+        self
+    }
+
+    /// Async read frame from RX buffer.
+    pub async fn read(&mut self) -> Result<Envelope, BusError> {
+        self.rx_buf.receive().await
+    }
+
+    /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
+    pub fn reader(&self) -> BufferedCanReceiver {
+        self.rx_buf.receiver().into()
+    }
+}
+
+impl<'c, 'd, T: Instance, const RX_BUF_SIZE: usize> Drop
+    for BufferedCanRx<'d, T, RX_BUF_SIZE>
+{
+    fn drop(&mut self) {
+        critical_section::with(|_| unsafe {
+            T::mut_state().rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+        });
+    }
+}
+
+
+/// Buffered FDCAN Instance
+pub struct BufferedCanTx<'d, T: Instance, const TX_BUF_SIZE: usize> {
+    _config: crate::can::fd::config::FdCanConfig,
+    _instance: FdcanInstance<'d, T>, //(PeripheralRef<'a, T>);
+    _mode: OperatingMode,
+    tx_buf: &'static TxBuf<TX_BUF_SIZE>,
+}
+
+impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize>
+    BufferedCanTx<'d, T, TX_BUF_SIZE>
+{
+    fn new(
+        _config: crate::can::fd::config::FdCanConfig,
+        _instance: FdcanInstance<'d, T>, //(PeripheralRef<'a, T>);
+        _mode: OperatingMode,
+        tx_buf: &'static TxBuf<TX_BUF_SIZE>,
+    ) -> Self {
+        BufferedCanTx {
+            _config,
+            _instance,
+            _mode,
+            tx_buf,
+        }
+        .setup()
+    }
+
+    fn setup(self) -> Self {
+        // We don't want interrupts being processed while we change modes.
+        critical_section::with(|_| unsafe {
+            let tx_inner = self::common::ClassicBufferedTxInner {
+                tx_receiver: self.tx_buf.receiver().into(),
+            };
+            T::mut_state().tx_mode = TxMode::ClassicBuffered(tx_inner);
+        });
+        self
+    }
+
+    /// Async write frame to TX buffer.
+    pub async fn write(&mut self, frame: Frame) {
+        self.tx_buf.send(frame).await;
+        T::IT0Interrupt::pend(); // Wake for Tx
+    }
+
+    /// Returns a sender that can be used for sending CAN frames.
+    pub fn writer(&self) -> BufferedCanSender {
+        BufferedCanSender {
+            tx_buf: self.tx_buf.sender().into(),
+            waker: T::IT0Interrupt::pend,
+        }
+    }
+}
+
+impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize> Drop
+    for BufferedCanTx<'d, T, TX_BUF_SIZE>
+{
+    fn drop(&mut self) {
+        critical_section::with(|_| unsafe {
+            T::mut_state().tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+        });
+    }
+}
+
 
 /// Buffered FDCAN Instance
 pub struct BufferedCan<'d, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> {
@@ -601,16 +723,16 @@ impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> Dr
 
 /// FDCAN Rx only Instance
 pub struct CanRx<'d, T: Instance> {
-    _instance1: PhantomData<T>,
-    _instance2: &'d crate::pac::can::Fdcan,
-    _mode: OperatingMode,
+    instance1: PhantomData<T>,
+    instance2: &'d crate::pac::can::Fdcan,
+    mode: OperatingMode,
 }
 
 /// FDCAN Tx only Instance
 pub struct CanTx<'d, T: Instance> {
     config: crate::can::fd::config::FdCanConfig,
-    _instance: FdcanInstance<'d, T>, //(PeripheralRef<'a, T>);
-    _mode: OperatingMode,
+    instance: FdcanInstance<'d, T>, //(PeripheralRef<'a, T>);
+    mode: OperatingMode,
 }
 
 impl<'c, 'd, T: Instance> CanTx<'d, T> {
@@ -629,6 +751,14 @@ impl<'c, 'd, T: Instance> CanTx<'d, T> {
     pub async fn write_fd(&mut self, frame: &FdFrame) -> Option<FdFrame> {
         T::state().tx_mode.write_fd::<T>(frame).await
     }
+
+    /// Return a buffered instance of driver. User must supply Buffers
+    pub fn buffered<const TX_BUF_SIZE: usize>(
+        self,
+        txb: &'static mut TxBuf<TX_BUF_SIZE>,
+    ) -> BufferedCanTx<'d, T, TX_BUF_SIZE> {
+        BufferedCanTx::new(self.config, self.instance, self.mode, txb)
+    }
 }
 
 impl<'c, 'd, T: Instance> CanRx<'d, T> {
@@ -641,6 +771,16 @@ impl<'c, 'd, T: Instance> CanRx<'d, T> {
     pub async fn read_fd(&mut self) -> Result<FdEnvelope, BusError> {
         T::state().rx_mode.read_fd::<T>().await
     }
+
+
+    /// Return a buffered instance of driver. User must supply Buffers
+    pub fn buffered<const RX_BUF_SIZE: usize>(
+        self,
+        rxb: &'static mut RxBuf<RX_BUF_SIZE>,
+    ) -> BufferedCanRx<'d, T, RX_BUF_SIZE> {
+        BufferedCanRx::new(self.instance1, self.instance2, self.mode, rxb)
+    }
+
 }
 
 enum RxMode {
