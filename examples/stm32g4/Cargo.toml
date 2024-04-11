@@ -25,6 +25,10 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 futures = { version = "0.3.17", default-features = false, features = ["async-await"] }
 heapless = { version = "0.8", default-features = false }
 static_cell = "2.0.0"
+display-interface-spi = "0.4.1"
+embedded-graphics = "0.8.0"
+mipidsi = "0.7.1"
+embedded-hal-bus = "0.1.0"
 
 [profile.release]
 debug = 2
