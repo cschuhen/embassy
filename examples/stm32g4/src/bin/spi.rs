@@ -70,10 +70,29 @@ async fn main_task(mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
      let di = SPIInterface::new(display_spi, dc);
 
 
-    #[cfg(feature = "st7789")]
+    #[cfg(feature = "st7735s")]
     let (mut display, W, H) = {
         const W: i32 = 128;
         const H: i32 = 160;
+
+        let display = Builder::new(mipidsi::models::ST7735s, di)
+        .reset_pin(rst)
+        //.refresh_order(RefreshOrder::new(
+        //    VerticalRefreshOrder::BottomToTop,
+        //    HorizontalRefreshOrder::RightToLeft,
+        //))
+        .invert_colors(ColorInversion::Inverted)
+        .color_order(ColorOrder::Bgr)
+        .display_size(W as u16, H as u16) // w, h
+        .init(&mut Delay)
+        .unwrap();
+        (display, W, H)    
+    };
+
+    #[cfg(feature = "st7789")]
+    let (mut display, W, H) = {
+        const W: i32 = 240;
+        const H: i32 = 320;
 
         let display = Builder::new(mipidsi::models::ST7789, di)
         .reset_pin(rst)
@@ -88,6 +107,8 @@ async fn main_task(mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
         .unwrap();
         (display, W, H)    
     };
+
+
     // Text
     let char_w = 10;
     let char_h = 20;
