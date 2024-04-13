@@ -25,21 +25,22 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 futures = { version = "0.3.17", default-features = false, features = ["async-await"] }
 heapless = { version = "0.8", default-features = false }
 static_cell = "2.0.0"
-#epd-waveshare = { version = "0.5.0", features = ["graphics"]  }
-#embedded-graphics = "0.7.1"
-#embedded-graphics-core = { version = "0.4" }
-#embedded-graphics = "0.8"
-#embedded-graphics-core = { version = "0.3.3" }
+embassy-embedded-hal = { version = "0.1.0", path = "../../embassy-embedded-hal", features = [
+    "defmt",
+] }
 
-embedded-hal-bus = "0.1.0"
 
-#embedded-svc = { version = "0.25", optional = true, default-features = false }
-#embedded-graphics = "0.6.2"
-#ssd1680 = "0.1.0"
-
-display-interface-spi = "0.4.1"
+embedded-hal-bus = { version = "0.1", features = ["async"] }
+embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
+mipidsi = {version="0.7.1", path = "../../../mipidsi/mipidsi" }
+#mipidsi = {version="0.7.1" }
+display-interface = "0.5.0"
 embedded-graphics = "0.8.0"
-mipidsi = "0.7.1"
+display-interface-spi = "0.5.0"
+
+[features]
+st7789 = []
+
 
 [profile.release]
 debug = 2
