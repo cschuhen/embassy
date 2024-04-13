@@ -28,10 +28,8 @@ use embedded_graphics::{
     prelude::*,
     text::Text,
 };
-use mipidsi::Builder;
+//use mipidsi::Builder;
 // Display
-const W: i32 = 320;
-const H: i32 = 240;
 
 
 #[embassy_executor::task]
@@ -45,25 +43,51 @@ async fn main_task(mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
     //let spidev = ExclusiveDevice::new(spi, cs, Delay);
     let mut delay = Delay {};
 
-    //let mut epd = Epd2in9::new(&mut spi, cs, busy, dc, reset, &mut delay).expect("eink initalize error");
-    //let mut spi = SpiDeviceDriver::new(spi, Option::<AnyIOPin>::None, &Config::new()).unwrap();
+    use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use embassy_sync::blocking_mutex::Mutex;
+    use core::cell::RefCell;
+    use mipidsi::Builder;
+    use mipidsi::options::{
+        ColorInversion, ColorOrder, HorizontalRefreshOrder, Orientation, RefreshOrder,
+        VerticalRefreshOrder,
+    };
 
-    // Initialise display controller
-    //let mut ssd1680 = Ssd1680::new(&mut spi, cs, busy, dc, rst, &mut delay).unwrap();
+    let spi_bus: Mutex<NoopRawMutex, _> = Mutex::new(RefCell::new(spi));
+    
+    let mut display_config = spi::Config::default();
+    display_config.frequency = mhz(1);
+    //display_config.phase = spi::Phase::CaptureOnSecondTransition;
+    //display_config.polarity = spi::Polarity::IdleHigh;
 
-    // SPI Display
-    //let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss1, 60_000_000_u32, Mode::Mode0).unwrap();
-    let di = SPIInterface::new(spi, dc, cs);
-    //let mut delay = Delay::new();
-    let mut display = Builder::st7789(di)
-        // width and height are switched on purpose because of the orientation
-        .with_display_size(H as u16, W as u16)
-        // this orientation applies for the Display HAT Mini by Pimoroni
-        .with_orientation(mipidsi::Orientation::LandscapeInverted(true))
-        .with_invert_colors(mipidsi::ColorInversion::Inverted)
-        .init(&mut Delay, Some(rst))
+     let display_spi = SpiDeviceWithConfig::new(
+        &spi_bus,
+        cs,
+        display_config,
+    );
+    use display_interface_spi::SPIInterface;
+
+     let di = SPIInterface::new(display_spi, dc);
+
+
+    #[cfg(feature = "st7789")]
+    let (mut display, W, H) = {
+        const W: i32 = 128;
+        const H: i32 = 160;
+
+        let display = Builder::new(mipidsi::models::ST7789, di)
+        .reset_pin(rst)
+        //.refresh_order(RefreshOrder::new(
+        //    VerticalRefreshOrder::BottomToTop,
+        //    HorizontalRefreshOrder::RightToLeft,
+        //))
+        .invert_colors(ColorInversion::Inverted)
+        .color_order(ColorOrder::Bgr)
+        .display_size(W as u16, H as u16) // w, h
+        .init(&mut Delay)
         .unwrap();
-
+        (display, W, H)    
+    };
     // Text
     let char_w = 10;
     let char_h = 20;
