@@ -32,15 +32,21 @@ embassy-embedded-hal = { version = "0.1.0", path = "../../embassy-embedded-hal",
 
 embedded-hal-bus = { version = "0.1", features = ["async"] }
 embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
-mipidsi = {version="0.7.1", path = "../../../mipidsi/mipidsi" }
 #mipidsi = {version="0.7.1" }
 display-interface = "0.5.0"
 embedded-graphics = "0.8.0"
+embedded-graphics-core = "0.4.0"
 display-interface-spi = "0.5.0"
+
+mipidsi = {version="0.7.1", path = "../../../mipidsi/mipidsi" }
+ssd1309 = {version="0.4.0", path="/home/cschuhen/rust/ssd1309", features=["graphics"] }
+
+
 
 [features]
 st7789 = []
 st7735s = []
+ssd1309 = []
 
 
 [profile.release]
