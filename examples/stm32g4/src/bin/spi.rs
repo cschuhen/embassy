@@ -22,8 +22,6 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use embedded_graphics_core::draw_target::DrawTarget;
 use embedded_hal::blocking::delay::{DelayMs, DelayUs};
-use embedded_hal_bus::spi::ExclusiveDevice;
-use heapless::String;
 //use mipidsi::Builder;
 // Display
 use ssd1309::mode::graphics::*;
@@ -31,32 +29,28 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 #[embassy_executor::task]
 async fn main_task(
-    mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
-    busy: Input<'static>,
+    spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
+    _busy: Input<'static>,
     cs: Output<'static>,
     dc: Output<'static>,
     rst: Output<'static>,
-    cs2: Output<'static>,
+    _cs2: Output<'static>,
 ) {
     //let spidev = ExclusiveDevice::new(spi, cs, Delay);
-    let mut delay = Delay {};
+    //let delay = Delay {};
 
     use core::cell::RefCell;
 
     use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use embassy_sync::blocking_mutex::Mutex;
-    use mipidsi::options::{
-        ColorInversion, ColorOrder, HorizontalRefreshOrder, Orientation, RefreshOrder, VerticalRefreshOrder,
-    };
+    use mipidsi::options::{ColorInversion, ColorOrder};
     use mipidsi::Builder;
 
     let spi_bus: Mutex<NoopRawMutex, _> = Mutex::new(RefCell::new(spi));
 
     let mut display_config = spi::Config::default();
     display_config.frequency = mhz(1);
-    //display_config.phase = spi::Phase::CaptureOnSecondTransition;
-    //display_config.polarity = spi::Polarity::IdleHigh;
 
     let display_spi = SpiDeviceWithConfig::new(&spi_bus, cs, display_config);
     use display_interface_spi::SPIInterface;
@@ -64,62 +58,53 @@ async fn main_task(
     let di = SPIInterface::new(display_spi, dc);
 
     #[cfg(feature = "st7735s")]
-    let (mut display, W, H) = {
-        const W: i32 = 128;
-        const H: i32 = 160;
+    let (mut display, width, height) = {
+        let width: i32 = 128;
+        let height: i32 = 160;
 
         let display = Builder::new(mipidsi::models::ST7735s, di)
             .reset_pin(rst)
-            //.refresh_order(RefreshOrder::new(
-            //    VerticalRefreshOrder::BottomToTop,
-            //    HorizontalRefreshOrder::RightToLeft,
-            //))
             .invert_colors(ColorInversion::Inverted)
             .color_order(ColorOrder::Bgr)
-            .display_size(W as u16, H as u16) // w, h
+            .display_size(width as u16, height as u16) // w, h
             .init(&mut Delay)
             .unwrap();
-        (display, W, H)
+        (display, width, height)
     };
 
     #[cfg(feature = "st7789")]
-    let (mut display, W, H) = {
-        const W: i32 = 240;
-        const H: i32 = 320;
+    let (mut display, width, height) = {
+        let width: i32 = 240;
+        let height: i32 = 320;
 
         let display = Builder::new(mipidsi::models::ST7789, di)
             .reset_pin(rst)
-            //.refresh_order(RefreshOrder::new(
-            //    VerticalRefreshOrder::BottomToTop,
-            //    HorizontalRefreshOrder::RightToLeft,
-            //))
             .invert_colors(ColorInversion::Inverted)
             .color_order(ColorOrder::Bgr)
-            .display_size(W as u16, H as u16) // w, h
+            .display_size(width as u16, height as u16) // w, h
             .init(&mut Delay)
             .unwrap();
-        (display, W, H)
+        (display, width, height)
     };
 
     #[cfg(feature = "ssd1309")]
-    let (mut display, W, H) = {
-        const W: i32 = 128;
-        const H: i32 = 64;
+    let (mut display, width, height) = {
+        let width: i32 = 128;
+        let height: i32 = 64;
         let mut display: GraphicsMode<_> = ssd1309::Builder::new().connect(di).into();
         let mut rst = rst;
 
         _ = display.reset(&mut rst, &mut Delay);
         display.init().unwrap();
         display.flush().unwrap();
-        (display, W, H)
+        (display, width, height)
     };
 
     // Text
     let char_w = 10;
-    let char_h = 20;
-    let text = "   Hello World ^_^;   ";
-    let mut text_x = W;
-    let mut text_y = H / 2;
+    let text = "Hello World ^_^;";
+    let mut text_x = width;
+    let text_y = height / 2;
 
     // Alternating color
 
@@ -127,16 +112,33 @@ async fn main_task(
     {
         let mut text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
         text_style.background_color = Some(BinaryColor::Off);
+        let mut cont = 1u8;
+        let text2 = "A Monster In the";
+
         loop {
             Timer::after_millis(100).await;
-
+            let right;
+            if (cont >> 4) & 0x01 == 0x01 {
+                _ = display.set_contrast(1);
+                right = Text::new(text2, Point::new(text_x, text_y), text_style)
+                    .draw(&mut display)
+                    .unwrap();
+            } else {
+                _ = display.set_contrast(255);
+                right = Text::new(text, Point::new(text_x, text_y), text_style)
+                    .draw(&mut display)
+                    .unwrap();
+            }
             // Draw text
-            let right = Text::new(text, Point::new(text_x, text_y), text_style)
-                .draw(&mut display)
-                .unwrap();
             //println!("T {} {}", text_x, text_y);
-            text_x = if right.x <= 0 { W } else { text_x - char_w };
+            //println!("C {}", cont);
+            text_x = if right.x <= 0 { width } else { text_x - char_w };
             display.flush().unwrap();
+            if cont == 255 {
+                cont = 1
+            } else {
+                cont += 1
+            }
         }
 
         // Turn off backlight and clear the display
@@ -152,27 +154,15 @@ async fn main_task(
         // Clear the display initially
         display.clear(colors[0]).unwrap();
 
-        let mut led_flags = 0b000;
-        let mut counter = 0;
         loop {
             Timer::after_millis(100).await;
-            counter += 1;
 
             // Draw text
             let right = Text::new(text, Point::new(text_x, text_y), text_style)
                 .draw(&mut display)
                 .unwrap();
-            text_x = if right.x <= 0 { W } else { text_x - char_w };
+            text_x = if right.x <= 0 { width } else { text_x - char_w };
         }
-
-        // Turn off backlight and clear the display
-        //backlight.set_low();
-        display.clear(Rgb565::BLACK).unwrap();
-    }
-
-    loop {
-        println!("Finished tests - going to sleep");
-        Timer::after_millis(1000).await;
     }
 }
 
