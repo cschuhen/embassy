@@ -24,12 +24,11 @@ use embedded_graphics_core::draw_target::DrawTarget;
 use embedded_hal::blocking::delay::{DelayMs, DelayUs};
 //use mipidsi::Builder;
 // Display
-use ssd1309::mode::graphics::*;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 #[embassy_executor::task]
 async fn main_task(
-    spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
+    spi: spi::Spi<'static, SPI1, embassy_stm32::mode::Blocking>,
     _busy: Input<'static>,
     cs: Output<'static>,
     dc: Output<'static>,
@@ -89,6 +88,7 @@ async fn main_task(
 
     #[cfg(feature = "ssd1309")]
     let (mut display, width, height) = {
+        use ssd1309::mode::graphics::*;
         let width: i32 = 128;
         let height: i32 = 64;
         let mut display: GraphicsMode<_> = ssd1309::Builder::new().connect(di).into();
@@ -100,6 +100,22 @@ async fn main_task(
         (display, width, height)
     };
 
+    #[cfg(feature = "sh1108")]
+    let (mut display, width, height) = {
+        use sh1108::mode::graphics::*;
+        let width: i32 = 128;
+        let height: i32 = 128;
+        let mut display: GraphicsMode<_> = sh1108::Builder::new().connect(di).into();
+
+        let mut rst = rst;
+
+        _ = display.reset(&mut rst, &mut Delay);
+        display.init2().unwrap();
+        display.flush().unwrap();
+        (display, width, height)
+    };
+
+
     // Text
     let char_w = 10;
     let text = "Hello World ^_^;";
@@ -108,7 +124,7 @@ async fn main_task(
 
     // Alternating color
 
-    #[cfg(any(feature = "ssd1309"))]
+    #[cfg(any(feature = "ssd1309", feature = "sh1108"))]
     {
         let mut text_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
         text_style.background_color = Some(BinaryColor::Off);
@@ -200,7 +216,7 @@ fn main() -> ! {
     let dc = Output::new(p.PA3, Level::High, Speed::Low);
     let reset = Output::new(p.PA4, Level::High, Speed::Low);
 
-    let spi = spi::Spi::new(p.SPI1, p.PA5, p.PA7, p.PA6, NoDma, NoDma, spi_config);
+    let spi = spi::Spi::new_blocking(p.SPI1, p.PA5, p.PA7, p.PA6, spi_config);
 
     let executor = EXECUTOR.init(Executor::new());
 
