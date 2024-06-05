@@ -8,30 +8,24 @@ use cortex_m_rt::entry;
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_stm32::dma::NoDma;
+use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::peripherals::SPI1;
-use embassy_stm32::time::mhz;
+use embassy_stm32::time::{mhz, Hertz};
 use embassy_stm32::{spi, Config};
-use embassy_stm32::time::Hertz;
+use embassy_time::{Delay, Duration, Ticker, Timer};
+use embedded_graphics::fonts::{Font6x8, Text};
+use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{Circle, Line, Rectangle};
+use embedded_graphics::style::PrimitiveStyle;
+use embedded_graphics::text_style;
+use embedded_hal::blocking::delay::{DelayMs, DelayUs};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use heapless::String;
+use ssd1680::color::{Black, Red, White};
+//use embedded_graphics_core::pixelcolor::BinaryColor;
+use ssd1680::prelude::*;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-use embassy_stm32::gpio::{Level, Output, Speed, Input, Pull};
-use embassy_time::{Delay, Duration, Ticker, Timer};
-use embedded_hal::blocking::delay::DelayUs;
-use embedded_hal::blocking::delay::DelayMs;
-//use embedded_graphics_core::pixelcolor::BinaryColor;
-
-use ssd1680::prelude::*;
-use ssd1680::color::{Black, White, Red};
-
-use embedded_graphics::{
-    fonts::{Font6x8, Text},
-    prelude::*,
-    primitives::{Circle, Line, Rectangle},
-    style::PrimitiveStyle,
-    text_style,
-};
 
 fn draw_rotation_and_rulers(display: &mut Display2in13) {
     display.set_rotation(DisplayRotation::Rotate0);
@@ -62,7 +56,7 @@ fn draw_ruler(display: &mut Display2in13) {
 
         if col % 50 == 0 {
             //let label = col.to_string();
-            
+
             draw_text(display, &"XX", col as i32, 12);
         }
     }
@@ -78,15 +72,15 @@ fn draw_text(display: &mut Display2in13, text: &str, x: i32, y: i32) {
         .draw(display);
 }
 
-
 #[embassy_executor::task]
-async fn main_task(mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
-        busy: Input<'static>,
-        cs: Output<'static>,
-        dc: Output<'static>,
-        rst: Output<'static>,
-        cs2: Output<'static>,
-    ) {
+async fn main_task(
+    mut spi: spi::Spi<'static, embassy_stm32::mode::Async>,
+    busy: Input<'static>,
+    cs: Output<'static>,
+    dc: Output<'static>,
+    rst: Output<'static>,
+    cs2: Output<'static>,
+) {
     //let spidev = ExclusiveDevice::new(spi, cs, Delay);
     let mut delay = Delay {};
 
@@ -133,9 +127,7 @@ async fn main_task(mut spi: spi::Spi<'static, SPI1, NoDma, NoDma>,
     loop {
         println!("Finished tests - going to sleep");
         Timer::after_millis(1000).await;
-
     }
-
 }
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -163,8 +155,6 @@ fn main() -> ! {
     }
     let p = embassy_stm32::init(config);
 
-
-
     let mut spi_config = spi::Config::default();
     spi_config.frequency = mhz(1);
 
@@ -174,7 +164,7 @@ fn main() -> ! {
     let dc = Output::new(p.PA3, Level::High, Speed::Low);
     let reset = Output::new(p.PA4, Level::High, Speed::Low);
 
-    let spi = spi::Spi::new(p.SPI1, p.PA5, p.PA7, p.PA6, NoDma, NoDma, spi_config);
+    let spi = spi::Spi::new(p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA1_CH1, p.DMA1_CH2, spi_config);
 
     let executor = EXECUTOR.init(Executor::new());
 
