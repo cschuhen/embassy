@@ -21,6 +21,7 @@ use self::fd::config::*;
 use self::fd::filter::*;
 pub use self::fd::{config, filter};
 pub use super::common::{BufferedCanReceiver, BufferedCanSender};
+use super::common::{RxGuard, TxGuard};
 use super::enums::*;
 use super::frame::*;
 use super::util;
@@ -213,7 +214,10 @@ impl<'d> CanConfigurator<'d> {
             info,
             properties: Properties::new(T::info()),
             periph_clock: T::frequency(),
-            raii_guards: (TxGuard::new(info), RxGuard::new(info)),
+            raii_guards: (
+                TxGuard::new(info.internal_operation),
+                RxGuard::new(info.internal_operation),
+            ),
         }
     }
 
@@ -421,7 +425,7 @@ pub struct BufferedCan<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> {
     tx_buf: &'static TxBuf<TX_BUF_SIZE>,
     rx_buf: &'static RxBuf<RX_BUF_SIZE>,
     properties: Properties,
-    raii_guards: (TxGuard, RxGuard),
+    _raii_guards: (TxGuard, RxGuard),
 }
 
 impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
@@ -438,7 +442,10 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
             tx_buf,
             rx_buf,
             properties: Properties::new(info),
-            raii_guards: (TxGuard::new(info), RxGuard::new(info)),
+            _raii_guards: (
+                TxGuard::new(info.internal_operation),
+                RxGuard::new(info.internal_operation),
+            ),
         }
         .setup()
     }
@@ -477,22 +484,18 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedCanSender {
-        // TODO Does not support TxGuard yet
-        (self.info.internal_operation)(InternalOperation::NotifySenderCreated);
         BufferedCanSender {
             tx_buf: self.tx_buf.sender().into(),
             waker: self.info.tx_waker,
-            internal_operation: self.info.internal_operation,
+            tx_guard: TxGuard::new(self.info.internal_operation),
         }
     }
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedCanReceiver {
-        // TODO Does not support RxGuard yet
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
         BufferedCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            internal_operation: self.info.internal_operation,
+            rx_guard: RxGuard::new(self.info.internal_operation),
         }
     }
 }
@@ -504,11 +507,9 @@ pub type RxFdBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Resul
 pub type TxFdBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, FdFrame, BUF_SIZE>;
 
 /// Sender that can be used for sending Classic CAN frames.
-// TODO Does not support TxGuard yet
 pub type BufferedFdCanSender = super::common::BufferedSender<'static, FdFrame>;
 
 /// Receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
-// TODO Does not support RxGuard yet
 pub type BufferedFdCanReceiver = super::common::BufferedReceiver<'static, FdEnvelope>;
 
 /// Buffered FDCAN Instance
@@ -519,7 +520,7 @@ pub struct BufferedCanFd<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize>
     tx_buf: &'static TxFdBuf<TX_BUF_SIZE>,
     rx_buf: &'static RxFdBuf<RX_BUF_SIZE>,
     properties: Properties,
-    raii_guards: (TxGuard, RxGuard),
+    _raii_guards: (TxGuard, RxGuard),
 }
 
 impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
@@ -536,7 +537,10 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
             tx_buf,
             rx_buf,
             properties: Properties::new(info),
-            raii_guards: (TxGuard::new(info), RxGuard::new(info)),
+            _raii_guards: (
+                TxGuard::new(info.internal_operation),
+                RxGuard::new(info.internal_operation),
+            ),
         }
         .setup()
     }
@@ -579,7 +583,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
         BufferedFdCanSender {
             tx_buf: self.tx_buf.sender().into(),
             waker: self.info.tx_waker,
-            internal_operation: self.info.internal_operation,
+            tx_guard: TxGuard::new(self.info.internal_operation),
         }
     }
 
@@ -588,7 +592,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
         (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
         BufferedFdCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            internal_operation: self.info.internal_operation,
+            rx_guard: RxGuard::new(self.info.internal_operation),
         }
     }
 }
@@ -910,41 +914,6 @@ struct Info {
     tx_waker: fn(),
     internal_operation: fn(InternalOperation),
     state: SharedState,
-}
-
-/// Implements RAII for the internal reference counting (TX side). Each TX type should contain one
-/// of these. The new method and the Drop impl will automatically call the reference counting
-/// function. Like this, the reference counting function does not need to be called manually for
-/// each TX type. Transceiver types (TX and RX) should contain one TxGuard and one RxGuard.
-struct TxGuard {
-    info: &'static Info,
-}
-impl TxGuard {
-    fn new(info: &'static Info) -> Self {
-        (info.internal_operation)(InternalOperation::NotifySenderCreated);
-        Self { info }
-    }
-}
-impl Drop for TxGuard {
-    fn drop(&mut self) {
-        (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
-    }
-}
-
-/// Implements RAII for the internal reference counting (RX side). See TxGuard for further doc.
-struct RxGuard {
-    info: &'static Info,
-}
-impl RxGuard {
-    fn new(info: &'static Info) -> Self {
-        (info.internal_operation)(InternalOperation::NotifyReceiverCreated);
-        Self { info }
-    }
-}
-impl Drop for RxGuard {
-    fn drop(&mut self) {
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
-    }
 }
 
 trait SealedInstance {
