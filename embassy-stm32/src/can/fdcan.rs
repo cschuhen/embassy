@@ -21,7 +21,7 @@ use self::fd::config::*;
 use self::fd::filter::*;
 pub use self::fd::{config, filter};
 pub use super::common::{BufferedCanReceiver, BufferedCanSender};
-use super::common::{RxGuard, TxGuard};
+use super::common::{Guards, RxGuard, TxGuard};
 use super::enums::*;
 use super::frame::*;
 use super::util;
@@ -168,11 +168,10 @@ fn calc_ns_per_timer_tick(
 pub struct CanConfigurator<'d> {
     _phantom: PhantomData<&'d ()>,
     config: crate::can::fd::config::FdCanConfig,
-    info: &'static Info,
     /// Reference to internals.
     properties: Properties,
     periph_clock: crate::time::Hertz,
-    raii_guards: (TxGuard, RxGuard),
+    guards: Guards,
 }
 
 impl<'d> CanConfigurator<'d> {
@@ -211,13 +210,9 @@ impl<'d> CanConfigurator<'d> {
         Self {
             _phantom: PhantomData,
             config,
-            info,
             properties: Properties::new(T::info()),
             periph_clock: T::frequency(),
-            raii_guards: (
-                TxGuard::new(info.internal_operation),
-                RxGuard::new(info.internal_operation),
-            ),
+            guards: Guards::new(info),
         }
     }
 
@@ -266,18 +261,18 @@ impl<'d> CanConfigurator<'d> {
 
     /// Start in mode.
     pub fn start(self, mode: OperatingMode) -> Can<'d> {
-        let ns_per_timer_tick = calc_ns_per_timer_tick(self.info, self.periph_clock, self.config.frame_transmit);
-        self.info.state.lock(|s| {
+        let ns_per_timer_tick =
+            calc_ns_per_timer_tick(self.guards.info(), self.periph_clock, self.config.frame_transmit);
+        self.guards.info().state.lock(|s| {
             s.borrow_mut().ns_per_timer_tick = ns_per_timer_tick;
         });
-        self.info.regs.into_mode(self.config, mode);
+        self.guards.info().regs.into_mode(self.config, mode);
         Can {
             _phantom: PhantomData,
             config: self.config,
-            info: self.info,
             _mode: mode,
-            properties: Properties::new(self.info),
-            raii_guards: self.raii_guards,
+            properties: Properties::new(self.guards.info()),
+            guards: Guards::new(self.guards.info()),
         }
     }
 
@@ -301,10 +296,9 @@ impl<'d> CanConfigurator<'d> {
 pub struct Can<'d> {
     _phantom: PhantomData<&'d ()>,
     config: crate::can::fd::config::FdCanConfig,
-    info: &'static Info,
     _mode: OperatingMode,
     properties: Properties,
-    raii_guards: (TxGuard, RxGuard),
+    guards: Guards,
 }
 
 impl<'d> Can<'d> {
@@ -316,7 +310,7 @@ impl<'d> Can<'d> {
     /// Flush one of the TX mailboxes.
     pub async fn flush(&self, idx: usize) {
         poll_fn(|cx| {
-            self.info.state.lock(|s| {
+            self.guards.info().state.lock(|s| {
                 s.borrow_mut().tx_mode.register(cx.waker());
             });
 
@@ -324,7 +318,7 @@ impl<'d> Can<'d> {
                 panic!("Bad mailbox");
             }
             let idx = 1 << idx;
-            if !self.info.regs.regs.txbrp().read().trp(idx) {
+            if !self.guards.info().regs.regs.txbrp().read().trp(idx) {
                 return Poll::Ready(());
             }
 
@@ -338,12 +332,12 @@ impl<'d> Can<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write(&mut self, frame: &Frame) -> Option<Frame> {
-        TxMode::write(self.info, frame).await
+        TxMode::write(self.guards.info(), frame).await
     }
 
     /// Returns the next received message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        RxMode::read_classic(self.info).await
+        RxMode::read_classic(self.guards.info()).await
     }
 
     /// Queues the message to be sent but exerts backpressure.  If a lower-priority
@@ -351,12 +345,12 @@ impl<'d> Can<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write_fd(&mut self, frame: &FdFrame) -> Option<FdFrame> {
-        TxMode::write_fd(self.info, frame).await
+        TxMode::write_fd(self.guards.info(), frame).await
     }
 
     /// Returns the next received message frame
     pub async fn read_fd(&mut self) -> Result<FdEnvelope, BusError> {
-        RxMode::read_fd(self.info).await
+        RxMode::read_fd(self.guards.info()).await
     }
 
     /// Split instance into separate portions: Tx(write), Rx(read), common properties
@@ -364,16 +358,14 @@ impl<'d> Can<'d> {
         (
             CanTx {
                 _phantom: PhantomData,
-                info: self.info,
                 config: self.config,
                 _mode: self._mode,
-                tx_guard: self.raii_guards.0,
+                tx_guard: TxGuard::new(self.guards.info()),
             },
             CanRx {
                 _phantom: PhantomData,
-                info: self.info,
                 _mode: self._mode,
-                rx_guard: self.raii_guards.1,
+                rx_guard: RxGuard::new(self.guards.info()),
             },
             Properties {
                 info: self.properties.info,
@@ -385,10 +377,9 @@ impl<'d> Can<'d> {
         Can {
             _phantom: PhantomData,
             config: tx.config,
-            info: tx.info,
             _mode: rx._mode,
-            properties: Properties::new(tx.info),
-            raii_guards: (tx.tx_guard, rx.rx_guard),
+            properties: Properties::new(tx.tx_guard.info()),
+            guards: Guards::new(tx.tx_guard.info()),
         }
     }
 
@@ -398,7 +389,7 @@ impl<'d> Can<'d> {
         tx_buf: &'static mut TxBuf<TX_BUF_SIZE>,
         rxb: &'static mut RxBuf<RX_BUF_SIZE>,
     ) -> BufferedCan<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
-        BufferedCan::new(self.info, self._mode, tx_buf, rxb)
+        BufferedCan::new(self.guards.info(), self._mode, tx_buf, rxb)
     }
 
     /// Return a buffered instance of driver with CAN FD support. User must supply Buffers
@@ -407,7 +398,7 @@ impl<'d> Can<'d> {
         tx_buf: &'static mut TxFdBuf<TX_BUF_SIZE>,
         rxb: &'static mut RxFdBuf<RX_BUF_SIZE>,
     ) -> BufferedCanFd<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
-        BufferedCanFd::new(self.info, self._mode, tx_buf, rxb)
+        BufferedCanFd::new(self.guards.info(), self._mode, tx_buf, rxb)
     }
 }
 
@@ -420,12 +411,11 @@ pub type TxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Frame, 
 /// Buffered FDCAN Instance
 pub struct BufferedCan<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
     _mode: OperatingMode,
     tx_buf: &'static TxBuf<TX_BUF_SIZE>,
     rx_buf: &'static RxBuf<RX_BUF_SIZE>,
     properties: Properties,
-    _raii_guards: (TxGuard, RxGuard),
+    guards: Guards,
 }
 
 impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
@@ -437,15 +427,11 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
     ) -> Self {
         BufferedCan {
             _phantom: PhantomData,
-            info,
             _mode,
             tx_buf,
             rx_buf,
             properties: Properties::new(info),
-            _raii_guards: (
-                TxGuard::new(info.internal_operation),
-                RxGuard::new(info.internal_operation),
-            ),
+            guards: Guards::new(info),
         }
         .setup()
     }
@@ -457,7 +443,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
 
     fn setup(self) -> Self {
         // We don't want interrupts being processed while we change modes.
-        self.info.state.lock(|s| {
+        self.guards.info().state.lock(|s| {
             let rx_inner = super::common::ClassicBufferedRxInner {
                 rx_sender: self.rx_buf.sender().into(),
             };
@@ -473,8 +459,8 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: Frame) {
         self.tx_buf.send(frame).await;
-        self.info.interrupt0.pend(); // Wake for Tx
-                                     //T::IT0Interrupt::pend(); // Wake for Tx
+        self.guards.info().interrupt0.pend(); // Wake for Tx
+                                              //T::IT0Interrupt::pend(); // Wake for Tx
     }
 
     /// Async read frame from RX buffer.
@@ -486,8 +472,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
     pub fn writer(&self) -> BufferedCanSender {
         BufferedCanSender {
             tx_buf: self.tx_buf.sender().into(),
-            waker: self.info.tx_waker,
-            tx_guard: TxGuard::new(self.info.internal_operation),
+            tx_guard: TxGuard::new(self.guards.info()),
         }
     }
 
@@ -495,7 +480,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d,
     pub fn reader(&self) -> BufferedCanReceiver {
         BufferedCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            rx_guard: RxGuard::new(self.info.internal_operation),
+            rx_guard: RxGuard::new(self.guards.info()),
         }
     }
 }
@@ -515,12 +500,11 @@ pub type BufferedFdCanReceiver = super::common::BufferedReceiver<'static, FdEnve
 /// Buffered FDCAN Instance
 pub struct BufferedCanFd<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
     _mode: OperatingMode,
     tx_buf: &'static TxFdBuf<TX_BUF_SIZE>,
     rx_buf: &'static RxFdBuf<RX_BUF_SIZE>,
     properties: Properties,
-    _raii_guards: (TxGuard, RxGuard),
+    guards: Guards,
 }
 
 impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'d, TX_BUF_SIZE, RX_BUF_SIZE> {
@@ -532,15 +516,11 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
     ) -> Self {
         BufferedCanFd {
             _phantom: PhantomData,
-            info,
             _mode,
             tx_buf,
             rx_buf,
             properties: Properties::new(info),
-            _raii_guards: (
-                TxGuard::new(info.internal_operation),
-                RxGuard::new(info.internal_operation),
-            ),
+            guards: Guards::new(info),
         }
         .setup()
     }
@@ -552,7 +532,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     fn setup(self) -> Self {
         // We don't want interrupts being processed while we change modes.
-        self.info.state.lock(|s| {
+        self.guards.info().state.lock(|s| {
             let rx_inner = super::common::FdBufferedRxInner {
                 rx_sender: self.rx_buf.sender().into(),
             };
@@ -568,8 +548,8 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: FdFrame) {
         self.tx_buf.send(frame).await;
-        self.info.interrupt0.pend(); // Wake for Tx
-                                     //T::IT0Interrupt::pend(); // Wake for Tx
+        self.guards.info().interrupt0.pend(); // Wake for Tx
+                                              //T::IT0Interrupt::pend(); // Wake for Tx
     }
 
     /// Async read frame from RX buffer.
@@ -579,20 +559,19 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedFdCanSender {
-        (self.info.internal_operation)(InternalOperation::NotifySenderCreated);
+        (self.guards.info().internal_operation)(InternalOperation::NotifySenderCreated);
         BufferedFdCanSender {
             tx_buf: self.tx_buf.sender().into(),
-            waker: self.info.tx_waker,
-            tx_guard: TxGuard::new(self.info.internal_operation),
+            tx_guard: TxGuard::new(self.guards.info()),
         }
     }
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedFdCanReceiver {
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
+        (self.guards.info().internal_operation)(InternalOperation::NotifyReceiverCreated);
         BufferedFdCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            rx_guard: RxGuard::new(self.info.internal_operation),
+            rx_guard: RxGuard::new(self.guards.info()),
         }
     }
 }
@@ -600,7 +579,6 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 /// FDCAN Rx only Instance
 pub struct CanRx<'d> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
     _mode: OperatingMode,
     rx_guard: RxGuard,
 }
@@ -608,19 +586,18 @@ pub struct CanRx<'d> {
 impl<'d> CanRx<'d> {
     /// Returns the next received message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        RxMode::read_classic(&self.info).await
+        RxMode::read_classic(&self.rx_guard.info()).await
     }
 
     /// Returns the next received message frame
     pub async fn read_fd(&mut self) -> Result<FdEnvelope, BusError> {
-        RxMode::read_fd(&self.info).await
+        RxMode::read_fd(&self.rx_guard.info()).await
     }
 }
 
 /// FDCAN Tx only Instance
 pub struct CanTx<'d> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
     config: crate::can::fd::config::FdCanConfig,
     _mode: OperatingMode,
     tx_guard: TxGuard,
@@ -632,7 +609,7 @@ impl<'c, 'd> CanTx<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write(&mut self, frame: &Frame) -> Option<Frame> {
-        TxMode::write(self.info, frame).await
+        TxMode::write(self.tx_guard.info(), frame).await
     }
 
     /// Queues the message to be sent but exerts backpressure.  If a lower-priority
@@ -640,7 +617,7 @@ impl<'c, 'd> CanTx<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write_fd(&mut self, frame: &FdFrame) -> Option<FdFrame> {
-        TxMode::write_fd(self.info, frame).await
+        TxMode::write_fd(self.tx_guard.info(), frame).await
     }
 }
 
@@ -907,12 +884,12 @@ impl State {
 }
 
 type SharedState = embassy_sync::blocking_mutex::Mutex<CriticalSectionRawMutex, core::cell::RefCell<State>>;
-struct Info {
+pub(crate) struct Info {
     regs: Registers,
     interrupt0: crate::interrupt::Interrupt,
     _interrupt1: crate::interrupt::Interrupt,
-    tx_waker: fn(),
-    internal_operation: fn(InternalOperation),
+    pub(crate) tx_waker: fn(),
+    pub(crate) internal_operation: fn(InternalOperation),
     state: SharedState,
 }
 

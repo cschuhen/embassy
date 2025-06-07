@@ -15,6 +15,7 @@ pub use embedded_can::{ExtendedId, Id, StandardId};
 use self::filter::MasterFilters;
 use self::registers::{Registers, RxFifo};
 pub use super::common::{BufferedCanReceiver, BufferedCanSender};
+use super::common::{Guards, RxGuard, TxGuard};
 use super::frame::{Envelope, Frame};
 use super::util;
 use crate::can::enums::{BusError, InternalOperation, TryReadError};
@@ -91,7 +92,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::SCEInterrupt> for SceInterrup
 /// Configuration proxy returned by [`Can::modify_config`].
 pub struct CanConfig<'a> {
     phantom: PhantomData<&'a ()>,
-    info: &'static Info,
+    guards: Guards,
     periph_clock: crate::time::Hertz,
 }
 
@@ -109,7 +110,7 @@ impl CanConfig<'_> {
     /// Then copy the `CAN_BUS_TIME` register value from the table and pass it as the `btr`
     /// parameter to this method.
     pub fn set_bit_timing(self, bt: crate::can::util::NominalBitTiming) -> Self {
-        self.info.regs.set_bit_timing(bt);
+        self.guards.info().regs.set_bit_timing(bt);
         self
     }
 
@@ -124,13 +125,13 @@ impl CanConfig<'_> {
     /// Enables or disables loopback mode: Internally connects the TX and RX
     /// signals together.
     pub fn set_loopback(self, enabled: bool) -> Self {
-        self.info.regs.set_loopback(enabled);
+        self.guards.info().regs.set_loopback(enabled);
         self
     }
 
     /// Enables or disables silent mode: Disconnects the TX signal from the pin.
     pub fn set_silent(self, enabled: bool) -> Self {
-        self.info.regs.set_silent(enabled);
+        self.guards.info().regs.set_silent(enabled);
         self
     }
 
@@ -141,7 +142,7 @@ impl CanConfig<'_> {
     ///
     /// Automatic retransmission is enabled by default.
     pub fn set_automatic_retransmit(self, enabled: bool) -> Self {
-        self.info.regs.set_automatic_retransmit(enabled);
+        self.guards.info().regs.set_automatic_retransmit(enabled);
         self
     }
 }
@@ -149,14 +150,14 @@ impl CanConfig<'_> {
 impl Drop for CanConfig<'_> {
     #[inline]
     fn drop(&mut self) {
-        self.info.regs.leave_init_mode();
+        self.guards.info().regs.leave_init_mode();
     }
 }
 
 /// CAN driver
 pub struct Can<'d> {
     phantom: PhantomData<&'d ()>,
-    info: &'static Info,
+    guards: Guards,
     state: &'static State,
     periph_clock: crate::time::Hertz,
 }
@@ -227,7 +228,7 @@ impl<'d> Can<'d> {
 
         Self {
             phantom: PhantomData,
-            info: T::info(),
+            guards: Guards::new(T::info()),
             state: T::state(),
             periph_clock: T::frequency(),
         }
@@ -244,11 +245,11 @@ impl<'d> Can<'d> {
     /// Calling this method will enter initialization mode. You must enable the peripheral
     /// again afterwards with [`enable`](Self::enable).
     pub fn modify_config(&mut self) -> CanConfig<'_> {
-        self.info.regs.enter_init_mode();
+        self.guards.info().regs.enter_init_mode();
 
         CanConfig {
             phantom: self.phantom,
-            info: self.info,
+            guards: Guards::new(self.guards.info()),
             periph_clock: self.periph_clock,
         }
     }
@@ -258,7 +259,7 @@ impl<'d> Can<'d> {
     /// This will wait for 11 consecutive recessive bits (bus idle state).
     /// Contrary to enable method from bxcan library, this will not freeze the executor while waiting.
     pub async fn enable(&mut self) {
-        while self.info.regs.enable_non_blocking().is_err() {
+        while self.guards.info().regs.enable_non_blocking().is_err() {
             // SCE interrupt is only generated for entering sleep mode, but not leaving.
             // Yield to allow other tasks to execute while can bus is initializing.
             embassy_futures::yield_now().await;
@@ -268,7 +269,7 @@ impl<'d> Can<'d> {
     /// Enables or disables the peripheral from automatically wakeup when a SOF is detected on the bus
     /// while the peripheral is in sleep mode
     pub fn set_automatic_wakeup(&mut self, enabled: bool) {
-        self.info.regs.set_automatic_wakeup(enabled);
+        self.guards.info().regs.set_automatic_wakeup(enabled);
     }
 
     /// Manually wake the peripheral from sleep mode.
@@ -276,12 +277,12 @@ impl<'d> Can<'d> {
     /// Waking the peripheral manually does not trigger a wake-up interrupt.
     /// This will wait until the peripheral has acknowledged it has awoken from sleep mode
     pub fn wakeup(&mut self) {
-        self.info.regs.wakeup()
+        self.guards.info().regs.wakeup()
     }
 
     /// Check if the peripheral is currently in sleep mode
     pub fn is_sleeping(&self) -> bool {
-        self.info.regs.0.msr().read().slak()
+        self.guards.info().regs.0.msr().read().slak()
     }
 
     /// Put the peripheral in sleep mode
@@ -293,8 +294,8 @@ impl<'d> Can<'d> {
     /// If the peripheral has automatic wakeup enabled, when a Start-of-Frame is detected
     /// the peripheral will automatically wake and receive the incoming message.
     pub async fn sleep(&mut self) {
-        self.info.regs.0.ier().modify(|i| i.set_slkie(true));
-        self.info.regs.0.mcr().modify(|m| m.set_sleep(true));
+        self.guards.info().regs.0.ier().modify(|i| i.set_slkie(true));
+        self.guards.info().regs.0.mcr().modify(|m| m.set_sleep(true));
 
         poll_fn(|cx| {
             self.state.err_waker.register(cx.waker());
@@ -306,7 +307,7 @@ impl<'d> Can<'d> {
         })
         .await;
 
-        self.info.regs.0.ier().modify(|i| i.set_slkie(false));
+        self.guards.info().regs.0.ier().modify(|i| i.set_slkie(false));
     }
 
     /// Enable FIFO scheduling of outgoing frames.
@@ -318,12 +319,12 @@ impl<'d> Can<'d> {
     ///
     /// FIFO scheduling is disabled by default.
     pub fn set_tx_fifo_scheduling(&mut self, enabled: bool) {
-        self.info.regs.set_tx_fifo_scheduling(enabled)
+        self.guards.info().regs.set_tx_fifo_scheduling(enabled)
     }
 
     /// Checks if FIFO scheduling of outgoing frames is enabled.
     pub fn tx_fifo_scheduling_enabled(&self) -> bool {
-        self.info.regs.tx_fifo_scheduling_enabled()
+        self.guards.info().regs.tx_fifo_scheduling_enabled()
     }
 
     /// Queues the message to be sent.
@@ -350,7 +351,7 @@ impl<'d> Can<'d> {
     pub async fn flush(&self, mb: Mailbox) {
         CanTx {
             _phantom: PhantomData,
-            info: self.info,
+            guard: TxGuard::new(self.guards.info()),
             state: self.state,
         }
         .flush_inner(mb)
@@ -366,7 +367,7 @@ impl<'d> Can<'d> {
     pub async fn flush_any(&self) {
         CanTx {
             _phantom: PhantomData,
-            info: self.info,
+            guard: TxGuard::new(self.guards.info()),
             state: self.state,
         }
         .flush_any_inner()
@@ -377,7 +378,7 @@ impl<'d> Can<'d> {
     pub async fn flush_all(&self) {
         CanTx {
             _phantom: PhantomData,
-            info: self.info,
+            guard: TxGuard::new(self.guards.info()),
             state: self.state,
         }
         .flush_all_inner()
@@ -392,12 +393,12 @@ impl<'d> Can<'d> {
     /// If there is a frame in the provided mailbox, and it is canceled successfully, this function
     /// returns `true`.
     pub fn abort(&mut self, mailbox: Mailbox) -> bool {
-        self.info.regs.abort(mailbox)
+        self.guards.info().regs.abort(mailbox)
     }
 
     /// Returns `true` if no frame is pending for transmission.
     pub fn is_transmitter_idle(&self) -> bool {
-        self.info.regs.is_idle()
+        self.guards.info().regs.is_idle()
     }
 
     /// Read a CAN frame.
@@ -406,19 +407,19 @@ impl<'d> Can<'d> {
     ///
     /// Returns a tuple of the time the message was received and the message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        self.state.rx_mode.read(self.info, self.state).await
+        self.state.rx_mode.read(self.guards.info(), self.state).await
     }
 
     /// Attempts to read a CAN frame without blocking.
     ///
     /// Returns [Err(TryReadError::Empty)] if there are no frames in the rx queue.
     pub fn try_read(&mut self) -> Result<Envelope, TryReadError> {
-        self.state.rx_mode.try_read(self.info)
+        self.state.rx_mode.try_read(self.guards.info())
     }
 
     /// Waits while receive queue is empty.
     pub async fn wait_not_empty(&mut self) {
-        self.state.rx_mode.wait_not_empty(self.info, self.state).await
+        self.state.rx_mode.wait_not_empty(self.guards.info(), self.state).await
     }
 
     /// Split the CAN driver into transmit and receive halves.
@@ -428,12 +429,12 @@ impl<'d> Can<'d> {
         (
             CanTx {
                 _phantom: PhantomData,
-                info: self.info,
+                guard: TxGuard::new(self.guards.info()),
                 state: self.state,
             },
             CanRx {
                 _phantom: PhantomData,
-                info: self.info,
+                guard: RxGuard::new(self.guards.info()),
                 state: self.state,
             },
         )
@@ -459,7 +460,7 @@ impl<'d> Can<'d> {
     /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
     /// peripheral instead.
     pub fn modify_filters(&mut self) -> MasterFilters<'_> {
-        unsafe { MasterFilters::new(self.info) }
+        unsafe { MasterFilters::new(self.guards.info()) }
     }
 }
 
@@ -514,7 +515,7 @@ impl<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d, TX_
 /// CAN driver, transmit half.
 pub struct CanTx<'d> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
+    guard: TxGuard,
     state: &'static State,
 }
 
@@ -525,7 +526,7 @@ impl<'d> CanTx<'d> {
     pub async fn write(&mut self, frame: &Frame) -> TransmitStatus {
         poll_fn(|cx| {
             self.state.tx_mode.register(cx.waker());
-            if let Ok(status) = self.info.regs.transmit(frame) {
+            if let Ok(status) = self.guard.info().regs.transmit(frame) {
                 return Poll::Ready(status);
             }
 
@@ -544,13 +545,13 @@ impl<'d> CanTx<'d> {
     /// This is done to work around a hardware limitation that could lead to out-of-order delivery
     /// of frames with the same priority.
     pub fn try_write(&mut self, frame: &Frame) -> Result<TransmitStatus, TryWriteError> {
-        self.info.regs.transmit(frame).map_err(|_| TryWriteError::Full)
+        self.guard.info().regs.transmit(frame).map_err(|_| TryWriteError::Full)
     }
 
     async fn flush_inner(&self, mb: Mailbox) {
         poll_fn(|cx| {
             self.state.tx_mode.register(cx.waker());
-            if self.info.regs.0.tsr().read().tme(mb.index()) {
+            if self.guard.info().regs.0.tsr().read().tme(mb.index()) {
                 return Poll::Ready(());
             }
 
@@ -568,7 +569,7 @@ impl<'d> CanTx<'d> {
         poll_fn(|cx| {
             self.state.tx_mode.register(cx.waker());
 
-            let tsr = self.info.regs.0.tsr().read();
+            let tsr = self.guard.info().regs.0.tsr().read();
             if tsr.tme(Mailbox::Mailbox0.index())
                 || tsr.tme(Mailbox::Mailbox1.index())
                 || tsr.tme(Mailbox::Mailbox2.index())
@@ -595,7 +596,7 @@ impl<'d> CanTx<'d> {
         poll_fn(|cx| {
             self.state.tx_mode.register(cx.waker());
 
-            let tsr = self.info.regs.0.tsr().read();
+            let tsr = self.guard.info().regs.0.tsr().read();
             if tsr.tme(Mailbox::Mailbox0.index())
                 && tsr.tme(Mailbox::Mailbox1.index())
                 && tsr.tme(Mailbox::Mailbox2.index())
@@ -621,12 +622,12 @@ impl<'d> CanTx<'d> {
     /// If there is a frame in the provided mailbox, and it is canceled successfully, this function
     /// returns `true`.
     pub fn abort(&mut self, mailbox: Mailbox) -> bool {
-        self.info.regs.abort(mailbox)
+        self.guard.info().regs.abort(mailbox)
     }
 
     /// Returns `true` if no frame is pending for transmission.
     pub fn is_idle(&self) -> bool {
-        self.info.regs.is_idle()
+        self.guard.info().regs.is_idle()
     }
 
     /// Return a buffered instance of driver. User must supply Buffers
@@ -634,7 +635,7 @@ impl<'d> CanTx<'d> {
         self,
         txb: &'static mut TxBuf<TX_BUF_SIZE>,
     ) -> BufferedCanTx<'d, TX_BUF_SIZE> {
-        BufferedCanTx::new(self.info, self.state, self, txb)
+        BufferedCanTx::new(self.guard.info(), self.state, self, txb)
     }
 }
 
@@ -643,7 +644,7 @@ pub type TxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Frame, 
 
 /// Buffered CAN driver, transmit half.
 pub struct BufferedCanTx<'d, const TX_BUF_SIZE: usize> {
-    info: &'static Info,
+    guard: TxGuard,
     state: &'static State,
     _tx: CanTx<'d>,
     tx_buf: &'static TxBuf<TX_BUF_SIZE>,
@@ -652,7 +653,7 @@ pub struct BufferedCanTx<'d, const TX_BUF_SIZE: usize> {
 impl<'d, const TX_BUF_SIZE: usize> BufferedCanTx<'d, TX_BUF_SIZE> {
     fn new(info: &'static Info, state: &'static State, _tx: CanTx<'d>, tx_buf: &'static TxBuf<TX_BUF_SIZE>) -> Self {
         Self {
-            info,
+            guard: TxGuard::new(info),
             state,
             _tx,
             tx_buf,
@@ -678,24 +679,16 @@ impl<'d, const TX_BUF_SIZE: usize> BufferedCanTx<'d, TX_BUF_SIZE> {
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: &Frame) {
         self.tx_buf.send(*frame).await;
-        let waker = self.info.tx_waker;
+        let waker = self.guard.info().tx_waker;
         waker(); // Wake for Tx
     }
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedCanSender {
-        (self.info.internal_operation)(InternalOperation::NotifySenderCreated);
         BufferedCanSender {
             tx_buf: self.tx_buf.sender().into(),
-            waker: self.info.tx_waker,
-            internal_operation: self.info.internal_operation,
+            tx_guard: TxGuard::new(self.guard.info()),
         }
-    }
-}
-
-impl<'d, const TX_BUF_SIZE: usize> Drop for BufferedCanTx<'d, TX_BUF_SIZE> {
-    fn drop(&mut self) {
-        (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
     }
 }
 
@@ -703,7 +696,7 @@ impl<'d, const TX_BUF_SIZE: usize> Drop for BufferedCanTx<'d, TX_BUF_SIZE> {
 #[allow(dead_code)]
 pub struct CanRx<'d> {
     _phantom: PhantomData<&'d ()>,
-    info: &'static Info,
+    guard: RxGuard,
     state: &'static State,
 }
 
@@ -714,19 +707,19 @@ impl<'d> CanRx<'d> {
     ///
     /// Returns a tuple of the time the message was received and the message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        self.state.rx_mode.read(self.info, self.state).await
+        self.state.rx_mode.read(self.guard.info(), self.state).await
     }
 
     /// Attempts to read a CAN frame without blocking.
     ///
     /// Returns [Err(TryReadError::Empty)] if there are no frames in the rx queue.
     pub fn try_read(&mut self) -> Result<Envelope, TryReadError> {
-        self.state.rx_mode.try_read(self.info)
+        self.state.rx_mode.try_read(self.guard.info())
     }
 
     /// Waits while receive queue is empty.
     pub async fn wait_not_empty(&mut self) {
-        self.state.rx_mode.wait_not_empty(self.info, self.state).await
+        self.state.rx_mode.wait_not_empty(self.guard.info(), self.state).await
     }
 
     /// Return a buffered instance of driver. User must supply Buffers
@@ -734,7 +727,7 @@ impl<'d> CanRx<'d> {
         self,
         rxb: &'static mut RxBuf<RX_BUF_SIZE>,
     ) -> BufferedCanRx<'d, RX_BUF_SIZE> {
-        BufferedCanRx::new(self.info, self.state, self, rxb)
+        BufferedCanRx::new(self.guard.info(), self.state, self, rxb)
     }
 
     /// Accesses the filter banks owned by this CAN peripheral.
@@ -742,7 +735,7 @@ impl<'d> CanRx<'d> {
     /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
     /// peripheral instead.
     pub fn modify_filters(&mut self) -> MasterFilters<'_> {
-        unsafe { MasterFilters::new(self.info) }
+        unsafe { MasterFilters::new(self.guard.info()) }
     }
 }
 
@@ -751,7 +744,7 @@ pub type RxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Result<
 
 /// CAN driver, receive half in Buffered mode.
 pub struct BufferedCanRx<'d, const RX_BUF_SIZE: usize> {
-    info: &'static Info,
+    guard: RxGuard,
     state: &'static State,
     rx: CanRx<'d>,
     rx_buf: &'static RxBuf<RX_BUF_SIZE>,
@@ -760,7 +753,7 @@ pub struct BufferedCanRx<'d, const RX_BUF_SIZE: usize> {
 impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
     fn new(info: &'static Info, state: &'static State, rx: CanRx<'d>, rx_buf: &'static RxBuf<RX_BUF_SIZE>) -> Self {
         BufferedCanRx {
-            info,
+            guard: RxGuard::new(info),
             state,
             rx,
             rx_buf,
@@ -800,7 +793,7 @@ impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
                         Err(e) => Err(TryReadError::BusError(e)),
                     }
                 } else {
-                    if let Some(err) = self.info.regs.curr_error() {
+                    if let Some(err) = self.guard.info().regs.curr_error() {
                         return Err(TryReadError::BusError(err));
                     } else {
                         Err(TryReadError::Empty)
@@ -820,10 +813,9 @@ impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedCanReceiver {
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
         BufferedCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            internal_operation: self.info.internal_operation,
+            rx_guard: RxGuard::new(self.guard.info()),
         }
     }
 
@@ -836,19 +828,13 @@ impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
     }
 }
 
-impl<'d, const RX_BUF_SIZE: usize> Drop for BufferedCanRx<'d, RX_BUF_SIZE> {
-    fn drop(&mut self) {
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
-    }
-}
-
 impl Drop for Can<'_> {
     fn drop(&mut self) {
         // Cannot call `free()` because it moves the instance.
         // Manually reset the peripheral.
-        self.info.regs.0.mcr().write(|w| w.set_reset(true));
-        self.info.regs.enter_init_mode();
-        self.info.regs.leave_init_mode();
+        self.guards.info().regs.0.mcr().write(|w| w.set_reset(true));
+        self.guards.info().regs.enter_init_mode();
+        self.guards.info().regs.leave_init_mode();
         //rcc::disable::<T>();
     }
 }
@@ -1063,8 +1049,8 @@ pub(crate) struct Info {
     rx0_interrupt: crate::interrupt::Interrupt,
     rx1_interrupt: crate::interrupt::Interrupt,
     sce_interrupt: crate::interrupt::Interrupt,
-    tx_waker: fn(),
-    internal_operation: fn(InternalOperation),
+    pub(crate) tx_waker: fn(),
+    pub(crate) internal_operation: fn(InternalOperation),
 
     /// The total number of filter banks available to the instance.
     ///

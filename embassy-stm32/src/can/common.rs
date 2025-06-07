@@ -24,7 +24,6 @@ pub(crate) struct FdBufferedTxInner {
 /// Sender that can be used for sending CAN frames.
 pub struct BufferedSender<'ch, FRAME> {
     pub(crate) tx_buf: embassy_sync::channel::SendDynamicSender<'ch, FRAME>,
-    pub(crate) waker: fn(),
     pub(crate) tx_guard: TxGuard,
 }
 
@@ -32,14 +31,14 @@ impl<'ch, FRAME> BufferedSender<'ch, FRAME> {
     /// Async write frame to TX buffer.
     pub fn try_write(&mut self, frame: FRAME) -> Result<(), embassy_sync::channel::TrySendError<FRAME>> {
         self.tx_buf.try_send(frame)?;
-        (self.waker)();
+        (self.tx_guard.info().tx_waker)();
         Ok(())
     }
 
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: FRAME) {
         self.tx_buf.send(frame).await;
-        (self.waker)();
+        (self.tx_guard.info().tx_waker)();
     }
 
     /// Allows a poll_fn to poll until the channel is ready to write
@@ -52,8 +51,7 @@ impl<'ch, FRAME> Clone for BufferedSender<'ch, FRAME> {
     fn clone(&self) -> Self {
         Self {
             tx_buf: self.tx_buf,
-            waker: self.waker,
-            tx_guard: TxGuard::new(self.tx_guard.internal_operation),
+            tx_guard: TxGuard::new(self.tx_guard.info()),
         }
     }
 }
@@ -101,7 +99,7 @@ impl<'ch, ENVELOPE> Clone for BufferedReceiver<'ch, ENVELOPE> {
     fn clone(&self) -> Self {
         Self {
             rx_buf: self.rx_buf,
-            rx_guard: RxGuard::new(self.rx_guard.internal_operation),
+            rx_guard: RxGuard::new(self.rx_guard.info()),
         }
     }
 }
@@ -114,32 +112,56 @@ pub type BufferedCanReceiver = BufferedReceiver<'static, Envelope>;
 /// function. Like this, the reference counting function does not need to be called manually for
 /// each TX type. Transceiver types (TX and RX) should contain one TxGuard and one RxGuard.
 pub(crate) struct TxGuard {
-    internal_operation: fn(InternalOperation),
+    //internal_operation: fn(InternalOperation),
+    info: &'static super::Info,
 }
 impl TxGuard {
-    pub(crate) fn new(internal_operation: fn(InternalOperation)) -> Self {
-        internal_operation(InternalOperation::NotifySenderCreated);
-        Self { internal_operation }
+    pub(crate) fn new(info: &'static super::Info) -> Self {
+        (info.internal_operation)(InternalOperation::NotifySenderCreated);
+        Self { info }
+    }
+    pub(crate) fn info(&self) -> &'static super::Info {
+        self.info
     }
 }
 impl Drop for TxGuard {
     fn drop(&mut self) {
-        (self.internal_operation)(InternalOperation::NotifySenderDestroyed);
+        (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
     }
 }
 
 /// Implements RAII for the internal reference counting (RX side). See TxGuard for further doc.
 pub(crate) struct RxGuard {
-    internal_operation: fn(InternalOperation),
+    info: &'static super::Info,
 }
 impl RxGuard {
-    pub(crate) fn new(internal_operation: fn(InternalOperation)) -> Self {
-        internal_operation(InternalOperation::NotifyReceiverCreated);
-        Self { internal_operation }
+    pub(crate) fn new(info: &'static super::Info) -> Self {
+        (info.internal_operation)(InternalOperation::NotifyReceiverCreated);
+        Self { info }
+    }
+    pub(crate) fn info(&self) -> &'static super::Info {
+        self.info
     }
 }
 impl Drop for RxGuard {
     fn drop(&mut self) {
-        (self.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
+        (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
+    }
+}
+
+pub(crate) struct Guards {
+    pub tx: TxGuard,
+    pub _rx: RxGuard,
+}
+
+impl Guards {
+    pub(crate) fn new(info: &'static super::Info) -> Self {
+        Self {
+            tx: TxGuard::new(info),
+            _rx: RxGuard::new(info),
+        }
+    }
+    pub(crate) fn info(&self) -> &'static super::Info {
+        self.tx.info()
     }
 }
