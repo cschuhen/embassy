@@ -161,7 +161,12 @@ impl Guards {
             _rx: RxGuard::new(info),
         }
     }
-    pub(crate) fn info(&self) -> &'static super::Info {
-        self.tx.info()
+}
+
+impl core::ops::Deref for Guards {
+    type Target = &'static super::Info;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx.info
     }
 }
