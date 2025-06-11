@@ -558,7 +558,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedFdCanSender {
-        (self.info.internal_operation)(InternalOperation::NotifySenderCreated);
+        (self.info.adjust_reference_counter)(InternalOperation::NotifySenderCreated);
         BufferedFdCanSender {
             tx_buf: self.tx_buf.sender().into(),
             info: TxInfoRef::new(&self.info),
@@ -567,7 +567,7 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedFdCanReceiver {
-        (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
+        (self.info.adjust_reference_counter)(InternalOperation::NotifyReceiverCreated);
         BufferedFdCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
             info: RxInfoRef::new(&self.info),
@@ -888,7 +888,7 @@ pub(crate) struct Info {
     interrupt0: crate::interrupt::Interrupt,
     _interrupt1: crate::interrupt::Interrupt,
     pub(crate) tx_waker: fn(),
-    pub(crate) internal_operation: fn(InternalOperation),
+    pub(crate) adjust_reference_counter: fn(InternalOperation),
     state: SharedState,
 }
 
@@ -897,7 +897,7 @@ trait SealedInstance {
 
     fn info() -> &'static Info;
     fn registers() -> crate::can::fd::peripheral::Registers;
-    fn internal_operation(val: InternalOperation);
+    fn adjust_reference_counter(val: InternalOperation);
 }
 
 /// Instance trait
@@ -919,7 +919,7 @@ macro_rules! impl_fdcan {
         impl SealedInstance for peripherals::$inst {
             const MSG_RAM_OFFSET: usize = $msg_ram_offset;
 
-            fn internal_operation(val: InternalOperation) {
+            fn adjust_reference_counter(val: InternalOperation) {
                 peripherals::$inst::info().state.lock(|s| {
                     let mut mut_state = s.borrow_mut();
                     match val {
@@ -961,7 +961,7 @@ macro_rules! impl_fdcan {
                     interrupt0: crate::_generated::peripheral_interrupts::$inst::IT0::IRQ,
                     _interrupt1: crate::_generated::peripheral_interrupts::$inst::IT1::IRQ,
                     tx_waker: crate::_generated::peripheral_interrupts::$inst::IT0::pend,
-                    internal_operation: peripherals::$inst::internal_operation,
+                    adjust_reference_counter: peripherals::$inst::adjust_reference_counter,
                     state: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(State::new())),
                 };
                 &INFO
