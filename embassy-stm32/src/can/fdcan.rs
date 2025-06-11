@@ -558,7 +558,6 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedFdCanSender {
-        (self.info.adjust_reference_counter)(InternalOperation::NotifySenderCreated);
         BufferedFdCanSender {
             tx_buf: self.tx_buf.sender().into(),
             info: TxInfoRef::new(&self.info),
@@ -567,7 +566,6 @@ impl<'c, 'd, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCanFd<'
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedFdCanReceiver {
-        (self.info.adjust_reference_counter)(InternalOperation::NotifyReceiverCreated);
         BufferedFdCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
             info: RxInfoRef::new(&self.info),
@@ -888,8 +886,44 @@ pub(crate) struct Info {
     interrupt0: crate::interrupt::Interrupt,
     _interrupt1: crate::interrupt::Interrupt,
     pub(crate) tx_waker: fn(),
-    pub(crate) adjust_reference_counter: fn(InternalOperation),
     state: SharedState,
+}
+
+impl Info {
+    pub(crate) fn adjust_reference_counter(&self, val: InternalOperation) {
+        self.state.lock(|s| {
+            let mut mut_state = s.borrow_mut();
+            match val {
+                InternalOperation::NotifySenderCreated => {
+                    mut_state.sender_instance_count += 1;
+                }
+                InternalOperation::NotifySenderDestroyed => {
+                    mut_state.sender_instance_count -= 1;
+                    if 0 == mut_state.sender_instance_count {
+                        (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                    }
+                }
+                InternalOperation::NotifyReceiverCreated => {
+                    mut_state.receiver_instance_count += 1;
+                }
+                InternalOperation::NotifyReceiverDestroyed => {
+                    mut_state.receiver_instance_count -= 1;
+                    if 0 == mut_state.receiver_instance_count {
+                        (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                    }
+                }
+            }
+            if mut_state.sender_instance_count == 0 && mut_state.receiver_instance_count == 0 {
+                unsafe {
+                    let tx_pin = crate::gpio::AnyPin::steal(mut_state.tx_pin_port.unwrap());
+                    tx_pin.set_as_disconnected();
+                    let rx_pin = crate::gpio::AnyPin::steal(mut_state.rx_pin_port.unwrap());
+                    rx_pin.set_as_disconnected();
+                    self.interrupt0.disable();
+                }
+            }
+        });
+    }
 }
 
 trait SealedInstance {
@@ -897,7 +931,6 @@ trait SealedInstance {
 
     fn info() -> &'static Info;
     fn registers() -> crate::can::fd::peripheral::Registers;
-    fn adjust_reference_counter(val: InternalOperation);
 }
 
 /// Instance trait
@@ -919,41 +952,6 @@ macro_rules! impl_fdcan {
         impl SealedInstance for peripherals::$inst {
             const MSG_RAM_OFFSET: usize = $msg_ram_offset;
 
-            fn adjust_reference_counter(val: InternalOperation) {
-                peripherals::$inst::info().state.lock(|s| {
-                    let mut mut_state = s.borrow_mut();
-                    match val {
-                        InternalOperation::NotifySenderCreated => {
-                            mut_state.sender_instance_count += 1;
-                        }
-                        InternalOperation::NotifySenderDestroyed => {
-                            mut_state.sender_instance_count -= 1;
-                            if ( 0 == mut_state.sender_instance_count) {
-                                (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-                            }
-                        }
-                        InternalOperation::NotifyReceiverCreated => {
-                            mut_state.receiver_instance_count += 1;
-                        }
-                        InternalOperation::NotifyReceiverDestroyed => {
-                            mut_state.receiver_instance_count -= 1;
-                            if ( 0 == mut_state.receiver_instance_count) {
-                                (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-                            }
-                        }
-                    }
-                    if mut_state.sender_instance_count == 0 && mut_state.receiver_instance_count == 0 {
-                        unsafe {
-                            let tx_pin = crate::gpio::AnyPin::steal(mut_state.tx_pin_port.unwrap());
-                            tx_pin.set_as_disconnected();
-                            let rx_pin = crate::gpio::AnyPin::steal(mut_state.rx_pin_port.unwrap());
-                            rx_pin.set_as_disconnected();
-                            rcc::disable::<peripherals::$inst>();
-                        }
-                    }
-                });
-            }
-
             fn info() -> &'static Info {
 
                 static INFO: Info = Info {
@@ -961,7 +959,6 @@ macro_rules! impl_fdcan {
                     interrupt0: crate::_generated::peripheral_interrupts::$inst::IT0::IRQ,
                     _interrupt1: crate::_generated::peripheral_interrupts::$inst::IT1::IRQ,
                     tx_waker: crate::_generated::peripheral_interrupts::$inst::IT0::pend,
-                    adjust_reference_counter: peripherals::$inst::adjust_reference_counter,
                     state: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(State::new())),
                 };
                 &INFO

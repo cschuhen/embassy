@@ -118,8 +118,8 @@ pub(crate) struct InfoRef {
 }
 impl InfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
-        (info.adjust_reference_counter)(InternalOperation::NotifyReceiverCreated);
-        (info.adjust_reference_counter)(InternalOperation::NotifySenderCreated);
+        info.adjust_reference_counter(InternalOperation::NotifyReceiverCreated);
+        info.adjust_reference_counter(InternalOperation::NotifySenderCreated);
         Self { info }
     }
     #[cfg(can_bxcan)]
@@ -130,8 +130,10 @@ impl InfoRef {
 
 impl Drop for InfoRef {
     fn drop(&mut self) {
-        (self.info.adjust_reference_counter)(InternalOperation::NotifyReceiverDestroyed);
-        (self.info.adjust_reference_counter)(InternalOperation::NotifySenderDestroyed);
+        self.info
+            .adjust_reference_counter(InternalOperation::NotifyReceiverDestroyed);
+        self.info
+            .adjust_reference_counter(InternalOperation::NotifySenderDestroyed);
     }
 }
 
@@ -153,7 +155,7 @@ pub(crate) struct TxInfoRef {
 
 impl TxInfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
-        (info.adjust_reference_counter)(InternalOperation::NotifySenderCreated);
+        info.adjust_reference_counter(InternalOperation::NotifySenderCreated);
         Self { info }
     }
     pub(crate) fn info(&self) -> &'static super::Info {
@@ -163,7 +165,8 @@ impl TxInfoRef {
 
 impl Drop for TxInfoRef {
     fn drop(&mut self) {
-        (self.info.adjust_reference_counter)(InternalOperation::NotifySenderDestroyed);
+        self.info
+            .adjust_reference_counter(InternalOperation::NotifySenderDestroyed);
     }
 }
 
@@ -184,7 +187,7 @@ pub(crate) struct RxInfoRef {
 
 impl RxInfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
-        (info.adjust_reference_counter)(InternalOperation::NotifyReceiverCreated);
+        info.adjust_reference_counter(InternalOperation::NotifyReceiverCreated);
         Self { info }
     }
     pub(crate) fn info(&self) -> &'static super::Info {
@@ -194,7 +197,8 @@ impl RxInfoRef {
 
 impl Drop for RxInfoRef {
     fn drop(&mut self) {
-        (self.info.adjust_reference_counter)(InternalOperation::NotifyReceiverDestroyed);
+        self.info
+            .adjust_reference_counter(InternalOperation::NotifyReceiverDestroyed);
     }
 }
 

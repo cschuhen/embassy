@@ -1063,7 +1063,6 @@ pub(crate) struct Info {
     rx1_interrupt: crate::interrupt::Interrupt,
     sce_interrupt: crate::interrupt::Interrupt,
     pub(crate) tx_waker: fn(),
-    pub(crate) adjust_reference_counter: fn(InternalOperation),
     state: SharedState,
 
     /// The total number of filter banks available to the instance.
@@ -1072,10 +1071,37 @@ pub(crate) struct Info {
     num_filter_banks: u8,
 }
 
+impl Info {
+    pub(crate) fn adjust_reference_counter(&self, val: InternalOperation) {
+        self.state.lock(|s| {
+            let mut mut_state = s.borrow_mut();
+            match val {
+                InternalOperation::NotifySenderCreated => {
+                    mut_state.sender_instance_count += 1;
+                }
+                InternalOperation::NotifySenderDestroyed => {
+                    mut_state.sender_instance_count -= 1;
+                    if 0 == mut_state.sender_instance_count {
+                        (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                    }
+                }
+                InternalOperation::NotifyReceiverCreated => {
+                    mut_state.receiver_instance_count += 1;
+                }
+                InternalOperation::NotifyReceiverDestroyed => {
+                    mut_state.receiver_instance_count -= 1;
+                    if 0 == mut_state.receiver_instance_count {
+                        (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                    }
+                }
+            }
+        });
+    }
+}
+
 trait SealedInstance {
     fn info() -> &'static Info;
     fn regs() -> crate::pac::can::Can;
-    fn adjust_reference_counter(val: InternalOperation);
 }
 
 /// CAN instance trait.
@@ -1133,7 +1159,6 @@ foreach_peripheral!(
                     rx1_interrupt: crate::_generated::peripheral_interrupts::$inst::RX1::IRQ,
                     sce_interrupt: crate::_generated::peripheral_interrupts::$inst::SCE::IRQ,
                     tx_waker: crate::_generated::peripheral_interrupts::$inst::TX::pend,
-                    adjust_reference_counter: peripherals::$inst::adjust_reference_counter,
                     num_filter_banks: peripherals::$inst::NUM_FILTER_BANKS,
                     state: embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(State::new())),
                 };
@@ -1141,32 +1166,6 @@ foreach_peripheral!(
             }
             fn regs() -> crate::pac::can::Can {
                 crate::pac::$inst
-            }
-
-            fn adjust_reference_counter(val: InternalOperation) {
-                peripherals::$inst::info().state.lock(|s| {
-                    let mut mut_state = s.borrow_mut();
-                    match val {
-                        InternalOperation::NotifySenderCreated => {
-                            mut_state.sender_instance_count += 1;
-                        }
-                        InternalOperation::NotifySenderDestroyed => {
-                            mut_state.sender_instance_count -= 1;
-                            if ( 0 == mut_state.sender_instance_count) {
-                                (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-                            }
-                        }
-                        InternalOperation::NotifyReceiverCreated => {
-                            mut_state.receiver_instance_count += 1;
-                        }
-                        InternalOperation::NotifyReceiverDestroyed => {
-                            mut_state.receiver_instance_count -= 1;
-                            if ( 0 == mut_state.receiver_instance_count) {
-                                (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-                            }
-                        }
-                    }
-                });
             }
         }
 
