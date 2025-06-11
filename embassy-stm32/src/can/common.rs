@@ -24,21 +24,21 @@ pub(crate) struct FdBufferedTxInner {
 /// Sender that can be used for sending CAN frames.
 pub struct BufferedSender<'ch, FRAME> {
     pub(crate) tx_buf: embassy_sync::channel::SendDynamicSender<'ch, FRAME>,
-    pub(crate) tx_guard: TxGuard,
+    pub(crate) info: TxInfoRef,
 }
 
 impl<'ch, FRAME> BufferedSender<'ch, FRAME> {
     /// Async write frame to TX buffer.
     pub fn try_write(&mut self, frame: FRAME) -> Result<(), embassy_sync::channel::TrySendError<FRAME>> {
         self.tx_buf.try_send(frame)?;
-        (self.tx_guard.info().tx_waker)();
+        (self.info.info().tx_waker)();
         Ok(())
     }
 
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: FRAME) {
         self.tx_buf.send(frame).await;
-        (self.tx_guard.info().tx_waker)();
+        (self.info.info().tx_waker)();
     }
 
     /// Allows a poll_fn to poll until the channel is ready to write
@@ -51,7 +51,7 @@ impl<'ch, FRAME> Clone for BufferedSender<'ch, FRAME> {
     fn clone(&self) -> Self {
         Self {
             tx_buf: self.tx_buf,
-            tx_guard: TxGuard::new(self.tx_guard.info()),
+            info: TxInfoRef::new(self.info.info()),
         }
     }
 }
@@ -62,7 +62,7 @@ pub type BufferedCanSender = BufferedSender<'static, Frame>;
 /// Receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
 pub struct BufferedReceiver<'ch, ENVELOPE> {
     pub(crate) rx_buf: embassy_sync::channel::SendDynamicReceiver<'ch, Result<ENVELOPE, BusError>>,
-    pub(crate) rx_guard: RxGuard,
+    pub(crate) info: RxInfoRef,
 }
 
 impl<'ch, ENVELOPE> BufferedReceiver<'ch, ENVELOPE> {
@@ -99,7 +99,7 @@ impl<'ch, ENVELOPE> Clone for BufferedReceiver<'ch, ENVELOPE> {
     fn clone(&self) -> Self {
         Self {
             rx_buf: self.rx_buf,
-            rx_guard: RxGuard::new(self.rx_guard.info()),
+            info: RxInfoRef::new(self.info.info()),
         }
     }
 }
@@ -107,15 +107,51 @@ impl<'ch, ENVELOPE> Clone for BufferedReceiver<'ch, ENVELOPE> {
 /// A BufferedCanReceiver for Classic CAN frames.
 pub type BufferedCanReceiver = BufferedReceiver<'static, Envelope>;
 
-/// Implements RAII for the internal reference counting (TX side). Each TX type should contain one
-/// of these. The new method and the Drop impl will automatically call the reference counting
-/// function. Like this, the reference counting function does not need to be called manually for
-/// each TX type. Transceiver types (TX and RX) should contain one TxGuard and one RxGuard.
-pub(crate) struct TxGuard {
+/// Provides a reference to the driver internals and implements RAII for the internal reference
+/// counting. Each type that can operate on the driver should contain either InfoRef
+/// or the similar TxInfoRef or RxInfoRef. The new method and the Drop impl will automatically
+/// call the reference counting function. Like this, the reference counting function does not
+/// need to be called manually for each type.
+pub(crate) struct InfoRef {
     //internal_operation: fn(InternalOperation),
     info: &'static super::Info,
 }
-impl TxGuard {
+impl InfoRef {
+    pub(crate) fn new(info: &'static super::Info) -> Self {
+        (info.internal_operation)(InternalOperation::NotifyReceiverCreated);
+        (info.internal_operation)(InternalOperation::NotifySenderCreated);
+        Self { info }
+    }
+    #[cfg(can_bxcan)]
+    pub(crate) fn info(&self) -> &'static super::Info {
+        self.info
+    }
+}
+
+impl Drop for InfoRef {
+    fn drop(&mut self) {
+        (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
+        (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
+    }
+}
+
+impl core::ops::Deref for InfoRef {
+    type Target = &'static super::Info;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+/// Provides a reference to the driver internals and implements RAII for the internal reference
+/// counting for Tx only types.
+/// See InfoRef for further doc.
+pub(crate) struct TxInfoRef {
+    //internal_operation: fn(InternalOperation),
+    info: &'static super::Info,
+}
+
+impl TxInfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
         (info.internal_operation)(InternalOperation::NotifySenderCreated);
         Self { info }
@@ -124,17 +160,29 @@ impl TxGuard {
         self.info
     }
 }
-impl Drop for TxGuard {
+
+impl Drop for TxInfoRef {
     fn drop(&mut self) {
         (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
     }
 }
 
-/// Implements RAII for the internal reference counting (RX side). See TxGuard for further doc.
-pub(crate) struct RxGuard {
+impl core::ops::Deref for TxInfoRef {
+    type Target = &'static super::Info;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+/// Provides a reference to the driver internals and implements RAII for the internal reference
+/// counting for Rx only types.
+/// See InfoRef for further doc.
+pub(crate) struct RxInfoRef {
     info: &'static super::Info,
 }
-impl RxGuard {
+
+impl RxInfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
         (info.internal_operation)(InternalOperation::NotifyReceiverCreated);
         Self { info }
@@ -143,30 +191,17 @@ impl RxGuard {
         self.info
     }
 }
-impl Drop for RxGuard {
+
+impl Drop for RxInfoRef {
     fn drop(&mut self) {
         (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
     }
 }
 
-pub(crate) struct Guards {
-    pub tx: TxGuard,
-    pub _rx: RxGuard,
-}
-
-impl Guards {
-    pub(crate) fn new(info: &'static super::Info) -> Self {
-        Self {
-            tx: TxGuard::new(info),
-            _rx: RxGuard::new(info),
-        }
-    }
-}
-
-impl core::ops::Deref for Guards {
+impl core::ops::Deref for RxInfoRef {
     type Target = &'static super::Info;
 
     fn deref(&self) -> &Self::Target {
-        &self.tx.info
+        &self.info
     }
 }
