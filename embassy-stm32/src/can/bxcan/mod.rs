@@ -256,7 +256,7 @@ impl<'d> Can<'d> {
 
         CanConfig {
             phantom: self.phantom,
-            info: InfoRef::new(self.info.info()),
+            info: InfoRef::new(&self.info),
             periph_clock: self.periph_clock,
         }
     }
@@ -360,7 +360,7 @@ impl<'d> Can<'d> {
     pub async fn flush(&self, mb: Mailbox) {
         CanTx {
             _phantom: PhantomData,
-            info: TxInfoRef::new(self.info.info()),
+            info: TxInfoRef::new(&self.info),
         }
         .flush_inner(mb)
         .await;
@@ -375,7 +375,7 @@ impl<'d> Can<'d> {
     pub async fn flush_any(&self) {
         CanTx {
             _phantom: PhantomData,
-            info: TxInfoRef::new(self.info.info()),
+            info: TxInfoRef::new(&self.info),
         }
         .flush_any_inner()
         .await
@@ -385,7 +385,7 @@ impl<'d> Can<'d> {
     pub async fn flush_all(&self) {
         CanTx {
             _phantom: PhantomData,
-            info: TxInfoRef::new(self.info.info()),
+            info: TxInfoRef::new(&self.info),
         }
         .flush_all_inner()
         .await
@@ -413,19 +413,19 @@ impl<'d> Can<'d> {
     ///
     /// Returns a tuple of the time the message was received and the message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        RxMode::read(self.info.info()).await
+        RxMode::read(&self.info).await
     }
 
     /// Attempts to read a CAN frame without blocking.
     ///
     /// Returns [Err(TryReadError::Empty)] if there are no frames in the rx queue.
     pub fn try_read(&mut self) -> Result<Envelope, TryReadError> {
-        RxMode::try_read(self.info.info())
+        RxMode::try_read(&self.info)
     }
 
     /// Waits while receive queue is empty.
     pub async fn wait_not_empty(&mut self) {
-        RxMode::wait_not_empty(self.info.info()).await
+        RxMode::wait_not_empty(&self.info).await
     }
 
     /// Split the CAN driver into transmit and receive halves.
@@ -435,11 +435,11 @@ impl<'d> Can<'d> {
         (
             CanTx {
                 _phantom: PhantomData,
-                info: TxInfoRef::new(self.info.info()),
+                info: TxInfoRef::new(&self.info),
             },
             CanRx {
                 _phantom: PhantomData,
-                info: RxInfoRef::new(self.info.info()),
+                info: RxInfoRef::new(&self.info),
             },
         )
     }
@@ -464,7 +464,7 @@ impl<'d> Can<'d> {
     /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
     /// peripheral instead.
     pub fn modify_filters(&mut self) -> MasterFilters<'_> {
-        unsafe { MasterFilters::new(self.info.info()) }
+        unsafe { MasterFilters::new(&self.info) }
     }
 }
 
@@ -646,7 +646,7 @@ impl<'d> CanTx<'d> {
         self,
         txb: &'static mut TxBuf<TX_BUF_SIZE>,
     ) -> BufferedCanTx<'d, TX_BUF_SIZE> {
-        BufferedCanTx::new(self.info.info(), self, txb)
+        BufferedCanTx::new(&self.info, self, txb)
     }
 }
 
@@ -694,7 +694,7 @@ impl<'d, const TX_BUF_SIZE: usize> BufferedCanTx<'d, TX_BUF_SIZE> {
     pub fn writer(&self) -> BufferedCanSender {
         BufferedCanSender {
             tx_buf: self.tx_buf.sender().into(),
-            info: TxInfoRef::new(self.info.info()),
+            info: TxInfoRef::new(&self.info),
         }
     }
 }
@@ -713,19 +713,19 @@ impl<'d> CanRx<'d> {
     ///
     /// Returns a tuple of the time the message was received and the message frame
     pub async fn read(&mut self) -> Result<Envelope, BusError> {
-        RxMode::read(self.info.info()).await
+        RxMode::read(&self.info).await
     }
 
     /// Attempts to read a CAN frame without blocking.
     ///
     /// Returns [Err(TryReadError::Empty)] if there are no frames in the rx queue.
     pub fn try_read(&mut self) -> Result<Envelope, TryReadError> {
-        RxMode::try_read(self.info.info())
+        RxMode::try_read(&self.info)
     }
 
     /// Waits while receive queue is empty.
     pub async fn wait_not_empty(&mut self) {
-        RxMode::wait_not_empty(self.info.info()).await
+        RxMode::wait_not_empty(&self.info).await
     }
 
     /// Return a buffered instance of driver. User must supply Buffers
@@ -733,7 +733,7 @@ impl<'d> CanRx<'d> {
         self,
         rxb: &'static mut RxBuf<RX_BUF_SIZE>,
     ) -> BufferedCanRx<'d, RX_BUF_SIZE> {
-        BufferedCanRx::new(self.info.info(), self, rxb)
+        BufferedCanRx::new(&self.info, self, rxb)
     }
 
     /// Accesses the filter banks owned by this CAN peripheral.
@@ -741,7 +741,7 @@ impl<'d> CanRx<'d> {
     /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
     /// peripheral instead.
     pub fn modify_filters(&mut self) -> MasterFilters<'_> {
-        unsafe { MasterFilters::new(self.info.info()) }
+        unsafe { MasterFilters::new(&self.info) }
     }
 }
 
@@ -817,7 +817,7 @@ impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
     pub fn reader(&self) -> BufferedCanReceiver {
         BufferedCanReceiver {
             rx_buf: self.rx_buf.receiver().into(),
-            info: RxInfoRef::new(self.info.info()),
+            info: RxInfoRef::new(&self.info),
         }
     }
 

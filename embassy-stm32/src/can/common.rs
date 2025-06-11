@@ -31,14 +31,14 @@ impl<'ch, FRAME> BufferedSender<'ch, FRAME> {
     /// Async write frame to TX buffer.
     pub fn try_write(&mut self, frame: FRAME) -> Result<(), embassy_sync::channel::TrySendError<FRAME>> {
         self.tx_buf.try_send(frame)?;
-        (self.info.info().tx_waker)();
+        (self.info.tx_waker)();
         Ok(())
     }
 
     /// Async write frame to TX buffer.
     pub async fn write(&mut self, frame: FRAME) {
         self.tx_buf.send(frame).await;
-        (self.info.info().tx_waker)();
+        (self.info.tx_waker)();
     }
 
     /// Allows a poll_fn to poll until the channel is ready to write
@@ -51,7 +51,7 @@ impl<'ch, FRAME> Clone for BufferedSender<'ch, FRAME> {
     fn clone(&self) -> Self {
         Self {
             tx_buf: self.tx_buf,
-            info: TxInfoRef::new(self.info.info()),
+            info: TxInfoRef::new(&self.info),
         }
     }
 }
@@ -99,7 +99,7 @@ impl<'ch, ENVELOPE> Clone for BufferedReceiver<'ch, ENVELOPE> {
     fn clone(&self) -> Self {
         Self {
             rx_buf: self.rx_buf,
-            info: RxInfoRef::new(self.info.info()),
+            info: RxInfoRef::new(&self.info),
         }
     }
 }
@@ -121,10 +121,6 @@ impl InfoRef {
         info.adjust_reference_counter(InternalOperation::NotifyReceiverCreated);
         info.adjust_reference_counter(InternalOperation::NotifySenderCreated);
         Self { info }
-    }
-    #[cfg(can_bxcan)]
-    pub(crate) fn info(&self) -> &'static super::Info {
-        self.info
     }
 }
 
@@ -158,9 +154,6 @@ impl TxInfoRef {
         info.adjust_reference_counter(InternalOperation::NotifySenderCreated);
         Self { info }
     }
-    pub(crate) fn info(&self) -> &'static super::Info {
-        self.info
-    }
 }
 
 impl Drop for TxInfoRef {
@@ -189,9 +182,6 @@ impl RxInfoRef {
     pub(crate) fn new(info: &'static super::Info) -> Self {
         info.adjust_reference_counter(InternalOperation::NotifyReceiverCreated);
         Self { info }
-    }
-    pub(crate) fn info(&self) -> &'static super::Info {
-        self.info
     }
 }
 

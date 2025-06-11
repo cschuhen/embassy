@@ -377,8 +377,8 @@ impl<'d> Can<'d> {
             _phantom: PhantomData,
             config: tx.config,
             _mode: rx._mode,
-            properties: Properties::new(tx.info.info()),
-            info: InfoRef::new(tx.info.info()),
+            properties: Properties::new(&tx.info),
+            info: InfoRef::new(&tx.info),
         }
     }
 
@@ -606,7 +606,7 @@ impl<'c, 'd> CanTx<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write(&mut self, frame: &Frame) -> Option<Frame> {
-        TxMode::write(self.info.info(), frame).await
+        TxMode::write(&self.info, frame).await
     }
 
     /// Queues the message to be sent but exerts backpressure.  If a lower-priority
@@ -614,7 +614,7 @@ impl<'c, 'd> CanTx<'d> {
     /// can be replaced, this call asynchronously waits for a frame to be successfully
     /// transmitted, then tries again.
     pub async fn write_fd(&mut self, frame: &FdFrame) -> Option<FdFrame> {
-        TxMode::write_fd(self.info.info(), frame).await
+        TxMode::write_fd(&self.info, frame).await
     }
 }
 
